@@ -1,0 +1,6 @@
+pygame
+numpy
+matplotlib
+ursina
+scipy
+ray
