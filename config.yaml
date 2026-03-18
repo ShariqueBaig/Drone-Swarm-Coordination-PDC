@@ -1,0 +1,27 @@
+# Configuration for Drone Swarm Simulation (Milestone 1)
+world:
+  width: 1000
+  height: 1000
+  boundary: hard-wall # options: 'hard-wall', 'wrap-around'
+  boundary_margin: 20
+  boundary_repulsion_strength: 1000.0
+
+drone:
+  num: 100
+  max_speed: 5.0
+  max_force: 0.1
+  perception_radius: 50
+  safety_distance: 10
+
+obstacles:
+  - [200, 200]
+  - [350, 600]
+  - [500, 400]
+  - [700, 250]
+  - [800, 750]
+
+rendering:
+  fps: 60
+  background_color: [30, 30, 30]
+  boid_color: [0, 191, 255]
+  obstacle_color: [255, 69, 0]
