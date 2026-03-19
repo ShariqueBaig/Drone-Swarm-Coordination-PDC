@@ -9,13 +9,13 @@ from datetime import datetime
 class PerformanceLogger:
     """Logs performance metrics for benchmarking"""
     
-    def __init__(self, log_file="benchmark_log.csv"):
+    def __init__(self, log_file="optimized_benchmark.csv"):
         self.log_file = log_file
         self.start_time = None
         self.frame_count = 0
-        self.frame_times = []  # Store last 100 frame times for accurate FPS
+        self.frame_times = []  # Store last 60 frame times for accurate FPS
         
-        # Create CSV with headers
+        # Fresh log each session
         with open(self.log_file, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([
@@ -34,13 +34,12 @@ class PerformanceLogger:
         self.frame_times.append(frame_time)
         self.frame_count += 1
         
-        # Keep only last 100 frame times
-        if len(self.frame_times) > 100:
+        # Keep only last 60 frame times (approx 1 second at 60fps)
+        if len(self.frame_times) > 60:
             self.frame_times.pop(0)
         
-        # Log every 100 frames
-        if self.frame_count % 100 == 0:
-            # Calculate average FPS over last 100 frames
+        # Log every 5 frames for more responsive graphs
+        if self.frame_count % 5 == 0:
             avg_frame_time = sum(self.frame_times) / len(self.frame_times)
             fps = 1.0 / avg_frame_time if avg_frame_time > 0 else 0
             
@@ -48,11 +47,7 @@ class PerformanceLogger:
             cpu_percent = psutil.cpu_percent()
             memory = psutil.Process().memory_info().rss / 1024 / 1024  # MB
             
-            # Swarm metrics - use the pre-computed avg_neighbors from swarm_manager
-            # This avoids O(n²) calculation again
-            avg_neighbors = swarm_manager.avg_neighbors
-            
-            # Get current method
+            avg_neighbors = getattr(swarm_manager, 'avg_neighbors', 0)
             method = getattr(swarm_manager, 'use_method', 'unknown')
             
             # Log to CSV
@@ -61,15 +56,14 @@ class PerformanceLogger:
                 writer.writerow([
                     datetime.now().isoformat(),
                     self.frame_count,
-                    f"{fps:.2f}",
-                    f"{cpu_percent:.1f}",
-                    f"{memory:.1f}",
+                    round(fps, 2),
+                    round(cpu_percent, 1),
+                    round(memory, 1),
                     len(swarm_manager.positions),
-                    f"{avg_neighbors:.2f}",
+                    round(avg_neighbors, 2),
                     method
                 ])
             
-            # Also print to console
-            print(f"\n[PERF] Frame {self.frame_count}: {fps:.1f} FPS | "
-                  f"CPU: {cpu_percent:.1f}% | Mem: {memory:.1f}MB | "
-                  f"Avg Neighbors: {avg_neighbors:.2f} | Method: {method}")
+            # Optional console print
+            if self.frame_count % 100 == 0:
+                print(f"[PERF] Frame {self.frame_count}: {fps:.1f} FPS | Mem: {memory:.1f}MB | Method: {method}")

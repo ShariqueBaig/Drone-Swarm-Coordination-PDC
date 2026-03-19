@@ -1,8 +1,7 @@
-# main.py is where everything connects:
 try:
-    from visualizer import run_viz
-    from swarm import SwarmManager
     from environment import Environment
+    from swarm_optimized import SwarmManagerOptimized as SwarmManager
+    from visualizer import run_viz
 except ImportError as e:
     print(f"Import Error in Modular Structure: {e}")
     import sys
@@ -11,7 +10,8 @@ except ImportError as e:
 # Initialize Environment (Suffiyan's A1.1-A1.5)
 env = Environment("config.yaml")
 
-# Initialize Swarm (Sharique's B1.1-B1.5)
+# Initialize Optimized Swarm (Sharique's logic + Ashhal's D1.1-D1.5 optimizations)
 swarm_manager = SwarmManager(env)
 
+# Run the simulation
 run_viz(swarm_mgr=swarm_manager, env=env)

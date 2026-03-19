@@ -21,6 +21,13 @@ Suffiyan is responsible for the **Physics & Environment Engine**. His completed 
 - **A1.4 (Boundary Physics):** Developed robust boundary handling, including "hard-wall" repulsion forces that push drones away from edges and "wrap-around" logic.
 - **A1.5 (Configuration Management):** Created `config.yaml` to centralize all simulation parameters (world size, obstacles, drone count, seed), ensuring the environment is easily tunable without touching code.
 
+## What Ashhal Has Done
+Ashhal is responsible for **Optimization & Parallelism**. His contributions ensure the simulation remains high-performance even as the swarm scales:
+
+- **D1.1 - D1.3 (Spatial Partitioning):** Implemented advanced spatial indexing algorithms including **Grid Hash** (`spatial_grid.py`) and **Quadtree** (`quadtree.py`) to reduce neighbor-sensing complexity from $O(N^2)$ to $O(N)$.
+- **D1.4 (Performance Logging):** Developed a comprehensive benchmarking suite (`performance_logger.py`) that tracks real-time FPS, CPU, and memory metrics, outputting data for analysis.
+- **D1.5 (Vectorization Baseline):** Ensured all optimization modules utilize NumPy broadcasting to maximize data parallelism.
+
 ## Project Structure & Team Contracts
 The codebase has been refactored to meet the modular architecture agreed upon by the team (Usman's contract):
 
@@ -30,15 +37,26 @@ pdc_project/
 │   ├── config.py          ← Shared constants
 │   ├── config.yaml        ← Environmental parameters (A1.5)
 │   ├── environment.py     ← Suffiyan (A1.1-A1.4): World physics
-│   ├── swarm.py           ← Sharique (B1.1-B1.5): SwarmManager
+│   ├── swarm.py           ← Sharique (B1.1-B1.5): SwarmManager logic
+│   ├── spatial_grid.py    ← Ashhal (D1.2): Grid Hash indexing
+│   ├── quadtree.py        ← Ashhal (D1.3): Quadtree indexing 
+│   ├── performance_logger.py ← Ashhal (D1.4): Metrics telemetry
 │   ├── visualizer.py      ← Usman (C1.1-C1.5): Rendering loop
 │   └── main.py            ← Shared integration entry point
 ```
 
 - **`src/environment.py`:** Handles world physics, boundary resolution, and obstacle data.
-- **`src/swarm.py`:** Contains the core behavioral logic (Boids). It exposes drone positions and velocities as NumPy arrays.
-- **`src/visualizer.py`:** The UI layer that consumes swarm data to render the 2D visualization and heading lines.
-- **`src/main.py`:** The integration layer that wires the environment, swarm, and visualizer together.
+- **`src/swarm.py`:** Contains the main SwarmManager and behavioral logic.
+- **`src/spatial_grid.py` / `src/quadtree.py`:** Optimization layers for fast neighbor lookups.
+- **`src/main.py`:** The integration layer that wires the environment, swarm, and visualizer together. By default, it uses Ashhal's **Optimized Swarm Manager** for superior performance.
+
+## Performance Telemetry
+Ashhal's optimization layer includes a real-time performance logger.
+- **`src/optimized_benchmark.csv`**: Automatically logs FPS and system usage.
+- **`src/view_logs.py`**: Run this to generate visual performance graphs of your swarm!
+  ```bash
+  python src/view_logs.py
+  ```
 
 ## Running the Simulation
 To verify the milestone progress thus far, run the shared entry point from the root of this folder:

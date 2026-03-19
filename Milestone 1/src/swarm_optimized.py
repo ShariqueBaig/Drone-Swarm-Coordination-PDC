@@ -199,9 +199,8 @@ class SwarmManagerOptimized:
         # Hard Collision Resolution
         self.resolve_collisions()
         
-        # Log performance every 100 frames
-        if self.frame_count % 100 == 0:
-            self.logger.end_frame(self)
+        # Log performance data
+        self.logger.end_frame(self)
 
     def resolve_collisions(self):
         """Same as original resolve_collisions"""
