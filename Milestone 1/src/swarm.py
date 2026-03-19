@@ -2,7 +2,7 @@ import numpy as np
 import pygame
 import config
 
-class Flock:
+class SwarmManager:
     def __init__(self):
         np.random.seed(config.seed)
         self.num_boids = config.num_boids
@@ -82,7 +82,9 @@ class Flock:
         # --- Obstacle Avoidance ---
         obstacle_steer = np.zeros((self.num_boids, 2))
         if self.obstacles:
-            obs_array = np.array(self.obstacles) # (M, 2)
+            # Parse Pygame Rect(x,y,w,h) objects from Suffiyan's logic to simple arrays
+            obs_centers = [(obs.centerx, obs.centery) if hasattr(obs, 'centerx') else obs for obs in self.obstacles]
+            obs_array = np.array(obs_centers) # (M, 2)
             # diff (N, M, 2)
             obs_diff = self.positions[:, np.newaxis, :] - obs_array[np.newaxis, :, :]
             obs_dist = np.linalg.norm(obs_diff, axis=2) # (N, M)
@@ -129,7 +131,8 @@ class Flock:
         if not self.obstacles:
             return
 
-        obs_array = np.array(self.obstacles)
+        obs_centers = [(obs.centerx, obs.centery) if hasattr(obs, 'centerx') else obs for obs in self.obstacles]
+        obs_array = np.array(obs_centers)
         # Check all boids against all obstacles
         # pos (N, 1, 2) - obs (1, M, 2)
         diff = self.positions[:, np.newaxis, :] - obs_array[np.newaxis, :, :]
@@ -151,7 +154,7 @@ class Flock:
             
             for boid_idx, obs_idx in zip(boid_indices, obs_indices):
                 # Vector from obstacle to boid
-                vec = self.positions[boid_idx] - self.obstacles[obs_idx]
+                vec = self.positions[boid_idx] - obs_array[obs_idx]
                 d = np.linalg.norm(vec)
                 
                 if d == 0: # Exact overlap, push random
@@ -191,64 +194,3 @@ class Flock:
         result[limit_force] = (result[limit_force] / force_mags[limit_force, np.newaxis]) * config.max_force
         
         return result
-
-    def draw(self, screen):
-        # Draw all boids
-        # Calculate angles
-        angles = np.arctan2(self.velocities[:, 1], self.velocities[:, 0])
-        
-        # Triangle points
-        r = 6
-        # Cos/Sin for all boids
-        cos_a = np.cos(angles)
-        sin_a = np.sin(angles)
-        
-        # Tip
-        p1_x = self.positions[:, 0] + cos_a * r * 2
-        p1_y = self.positions[:, 1] + sin_a * r * 2
-        
-        # Back Left (angle + 2.5 rad)
-        cos_a_l = np.cos(angles + 2.5)
-        sin_a_l = np.sin(angles + 2.5)
-        p2_x = self.positions[:, 0] + cos_a_l * r
-        p2_y = self.positions[:, 1] + sin_a_l * r
-        
-        # Back Right (angle - 2.5 rad)
-        cos_a_r = np.cos(angles - 2.5)
-        sin_a_r = np.sin(angles - 2.5)
-        p3_x = self.positions[:, 0] + cos_a_r * r
-        p3_y = self.positions[:, 1] + sin_a_r * r
-        
-        # Stack into vertices (N, 3, 2)
-        p1 = np.stack((p1_x, p1_y), axis=1)
-        p2 = np.stack((p2_x, p2_y), axis=1)
-        p3 = np.stack((p3_x, p3_y), axis=1)
-        
-        # Calculate line end points (start is p1 - tip, end is p1 + velocity_direction * 20)
-        line_length = 20
-        line_end_x = p1_x + cos_a * line_length
-        line_end_y = p1_y + sin_a * line_length
-        line_end = np.stack((line_end_x, line_end_y), axis=1)
-
-        # Ideally we would use a batch draw, but Pygame doesn't support polygon batch well.
-        # We simulate batch drawing loops, but since N is small (< 1000) this loop is faster than O(N^2) logic.
-        for i in range(self.num_boids):
-             pygame.draw.polygon(screen, config.BOID_COLOR, [p1[i], p2[i], p3[i]])
-             # Draw direction line directly to screen (much faster than full transparent surface)
-             pygame.draw.line(screen, (200, 200, 200), p1[i], line_end[i], 1)
-
-        for obstacle in self.obstacles:
-            pygame.draw.circle(screen, config.OBSTACLE_COLOR, (int(obstacle[0]), int(obstacle[1])), config.obstacle_radius)
-
-    def add_obstacle(self, x, y):
-        self.obstacles.append((x, y))
-
-    def remove_obstacle(self, x, y):
-        to_remove = []
-        for obstacle in self.obstacles:
-            dist = np.linalg.norm(np.array(obstacle) - np.array([x, y]))
-            if dist < config.obstacle_radius:
-                to_remove.append(obstacle)
-        
-        for item in to_remove:
-            self.obstacles.remove(item)

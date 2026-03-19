@@ -40,6 +40,27 @@ CSV/JSON logs           Real-time 3D dashboard        ROS2 bag recording
 
 ---
 
+## 📂 Standard Folder Structure
+Agree on one folder structure first to ensure seamless integration:
+
+```text
+pdc_project/
+├── config.py          ← Shared constants (Weights, radii, dt)
+├── environment.py     ← Suffiyan (A1.1-A1.5): World & Obstacle logic
+├── swarm.py           ← Sharique (B1.1-B1.5): SwarmManager physics
+├── optimization.py    ← Ashhal (D1.1-D1.5): Spatial partitioning
+├── visualizer.py      ← Usman (C1.1-C1.5): Rendering loop
+└── main.py            ← Shared entry point
+```
+
+### Shared Data Contracts
+1. **`drone_positions`**: `np.ndarray(shape=(100, 2))` — Sharique provides this (B1.1)
+2. **`drone_velocities`**: `np.ndarray(shape=(100, 2))` — Sharique provides this (B1.2)
+3. **`neighbor_map`**: `dict[int, list[int]]` — Ashhal provides this (D1.2)
+4. **`obstacles`**: `list[pygame.Rect]` — Suffiyan provides this (A1.2)
+
+---
+
 ## 🏁 MILESTONE 1 — Environmental Modeling and Drone Behavior Foundation
 **Goal:** Establish the simulated environment and foundational drone control logic in 2D.  
 **Duration:** Weeks 1–3 | **Trigger to proceed:** 100 drones spawn randomly, move, and sense neighbors without collisions.
