@@ -4,13 +4,18 @@ import config
 
 class Flock:
     def __init__(self):
+        np.random.seed(config.seed)
         self.num_boids = config.num_boids
+        self.ids = np.arange(self.num_boids)
         self.positions = np.random.rand(self.num_boids, 2) * [config.width, config.height]
         self.velocities = (np.random.rand(self.num_boids, 2) - 0.5) * config.max_speed
         self.accelerations = np.zeros((self.num_boids, 2))
         self.obstacles = []
 
-    def update(self):
+    def update(self, dt=None):
+        if dt is None:
+            dt = config.dt
+            
         # Reset accelerations
         self.accelerations = np.zeros((self.num_boids, 2))
         
@@ -26,14 +31,15 @@ class Flock:
 
         # Boolean mask for neighbors
         mask = dist_matrix < config.perception_radius
+        separation_mask = dist_matrix < config.safety_distance
         
         # --- Separation ---
         # Weight by distance: diff / dist
         # Avoid division by zero (already handled by diagonal inf)
         with np.errstate(divide='ignore', invalid='ignore'):
             separation_vectors = diff_matrix / dist_matrix[:, :, np.newaxis]
-        # Only consider neighbors
-        separation_vectors[~mask] = 0
+        # Only consider neighbors within safety distance
+        separation_vectors[~separation_mask] = 0
         separation = np.sum(separation_vectors, axis=1)
         
         # --- Alignment ---
@@ -110,7 +116,7 @@ class Flock:
         self.velocities[limit_mask] = (self.velocities[limit_mask] / speeds[limit_mask, np.newaxis]) * config.max_speed
         
         # Update Position
-        self.positions += self.velocities
+        self.positions += self.velocities * dt
         
         # Wrap Edges
         self.positions[:, 0] = np.mod(self.positions[:, 0], config.width)
@@ -224,18 +230,12 @@ class Flock:
         line_end_y = p1_y + sin_a * line_length
         line_end = np.stack((line_end_x, line_end_y), axis=1)
 
-        # Create a transparent surface for lines
-        item_surf = pygame.Surface((config.width, config.height), pygame.SRCALPHA)
-        
         # Ideally we would use a batch draw, but Pygame doesn't support polygon batch well.
         # We simulate batch drawing loops, but since N is small (< 1000) this loop is faster than O(N^2) logic.
         for i in range(self.num_boids):
              pygame.draw.polygon(screen, config.BOID_COLOR, [p1[i], p2[i], p3[i]])
-             # Draw direction line on transparent surface
-             pygame.draw.line(item_surf, (255, 255, 255, 50), p1[i], line_end[i], 1)
-        
-        # Blit the transparent surface
-        screen.blit(item_surf, (0, 0))
+             # Draw direction line directly to screen (much faster than full transparent surface)
+             pygame.draw.line(screen, (200, 200, 200), p1[i], line_end[i], 1)
 
         for obstacle in self.obstacles:
             pygame.draw.circle(screen, config.OBSTACLE_COLOR, (int(obstacle[0]), int(obstacle[1])), config.obstacle_radius)

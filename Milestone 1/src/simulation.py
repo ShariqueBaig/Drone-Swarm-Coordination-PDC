@@ -38,7 +38,7 @@ def main():
                      flock = Flock() # Reset
 
         # Update
-        flock.update()
+        flock.update(config.dt)
 
         # Draw
         screen.fill(config.BACKGROUND_COLOR)

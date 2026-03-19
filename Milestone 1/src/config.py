@@ -5,9 +5,12 @@ width, height = 1200, 800
 
 # Boid parameters
 num_boids = 100
-max_speed = 5
-max_force = 0.1
+max_speed = 250         # Scaled up for dt=0.02 (was 5 per frame)
+max_force = 5.0         # Scaled up for dt=0.02 (was 0.1 per frame)
 perception_radius = 50
+safety_distance = 20    # Radius for reactive avoidance (separation)
+seed = 42               # Random initialization seed
+dt = 0.02               # Fixed time step
 
 # Rule weights
 separation_weight = 1.5

@@ -59,10 +59,10 @@ CSV/JSON logs           Real-time 3D dashboard        ROS2 bag recording
 | Task ID | Task | Details | How-To |
 |:---|:---|:---|:---|
 | **B1.1** | Drone Representation | Properties: `id`, `pos [x,y]`, `vel [vx,vy]`, `heading θ`. Methods: `update_position(dt)`. | NumPy arrays for pos/vel |
-| **B1.2** | 2D Kinematics | `pos += vel * dt`. Clamp speed: `if |vel| > v_max: vel = vel/|vel| * v_max`. | NumPy vector ops |
-| **B1.3** | Random Initialization | Scatter 100 drones randomly in world. Use `random.seed(config.seed)`. | `np.random.uniform(0, world_size, (100,2))` |
+| **B1.2** | 2D Kinematics | `pos += vel * dt`. Clamp scaled speed (`v_max=250` for `dt=0.02`). | NumPy vector ops |
+| **B1.3** | Random Initialization | Scatter 100 drones randomly in world. Use `np.random.seed(42)`. | `np.random.rand()` |
 | **B1.4** | Basic Drone Sensing | Each drone detects neighbors within a fixed interaction radius `R`. | Share global positions array |
-| **B1.5** | Reactive Avoidance | If two drones approach within `safety_distance`, adjust direction or speed. | Priority override on velocity |
+| **B1.5** | Reactive Avoidance | Balance `safety_distance` (20) forces to form non-colliding emergent lattice structures. | Strong separation override |
 
 ### Usman — Visualization & UI/UX
 
