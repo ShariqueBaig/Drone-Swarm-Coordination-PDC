@@ -26,4 +26,8 @@ OBSTACLE_COLOR = (255, 69, 0)  # Red-Orange
 
 # Obstacle parameters
 obstacle_radius = 40
-boundary_margin = 100 # Distance from wall to start steering away
+boundary_margin = 100  # Distance from wall to start steering away
+
+# Additional parameters for optimization (add these if missing)
+cell_size = perception_radius  # For spatial grid
+log_frequency = 100  # Log performance every 100 frames
