@@ -3,14 +3,14 @@ import pygame
 import config
 
 class SwarmManager:
-    def __init__(self):
-        np.random.seed(config.seed)
-        self.num_boids = config.num_boids
+    def __init__(self, env):
+        self.env = env
+        np.random.seed(env.seed)
+        self.num_boids = env.num_drones
         self.ids = np.arange(self.num_boids)
-        self.positions = np.random.rand(self.num_boids, 2) * [config.width, config.height]
+        self.positions = np.random.rand(self.num_boids, 2) * [env.width, env.height]
         self.velocities = (np.random.rand(self.num_boids, 2) - 0.5) * config.max_speed
         self.accelerations = np.zeros((self.num_boids, 2))
-        self.obstacles = []
 
     def update(self, dt=None):
         if dt is None:
@@ -81,21 +81,21 @@ class SwarmManager:
 
         # --- Obstacle Avoidance ---
         obstacle_steer = np.zeros((self.num_boids, 2))
-        if self.obstacles:
-            # Parse Pygame Rect(x,y,w,h) objects from Suffiyan's logic to simple arrays
-            obs_centers = [(obs.centerx, obs.centery) if hasattr(obs, 'centerx') else obs for obs in self.obstacles]
-            obs_array = np.array(obs_centers) # (M, 2)
+        if self.env.obstacles:
+            # Suffiyan's environment format: list of (x, y, r)
+            obs_centers = np.array([[ob[0], ob[1]] for ob in self.env.obstacles])
+            obs_radii = np.array([ob[2] for ob in self.env.obstacles])
+            
             # diff (N, M, 2)
-            obs_diff = self.positions[:, np.newaxis, :] - obs_array[np.newaxis, :, :]
+            obs_diff = self.positions[:, np.newaxis, :] - obs_centers[np.newaxis, :, :]
             obs_dist = np.linalg.norm(obs_diff, axis=2) # (N, M)
             
-            obs_mask = obs_dist < (config.perception_radius + config.obstacle_radius)
+            # Avoidance if within perception + obstacle radius
+            obs_mask = obs_dist < (config.perception_radius + obs_radii[np.newaxis, :])
             
             with np.errstate(divide='ignore', invalid='ignore'):
-                # Stronger avoidance (inverse distance squared or similar)
-                # Normalizing diff gives direction. Dividing by dist gives 1/d. 
-                # Dividing by dist^2 gives 1/d^2 force.
-                obs_avoid_vec = (obs_diff / obs_dist[:, :, np.newaxis]) / (obs_dist[:, :, np.newaxis] / config.obstacle_radius)
+                # Normalize diff and scale by 1/distance
+                obs_avoid_vec = (obs_diff / obs_dist[:, :, np.newaxis]) / (obs_dist[:, :, np.newaxis] / obs_radii[np.newaxis, :, np.newaxis])
             
             obs_avoid_vec[~obs_mask] = 0
             obstacle_steer = np.sum(obs_avoid_vec, axis=1)
@@ -120,59 +120,50 @@ class SwarmManager:
         # Update Position
         self.positions += self.velocities * dt
         
-        # Wrap Edges
-        self.positions[:, 0] = np.mod(self.positions[:, 0], config.width)
-        self.positions[:, 1] = np.mod(self.positions[:, 1], config.height)
+        # Boundary Handling (Using Environment's resolve logic)
+        for i in range(self.num_boids):
+            new_pos, new_vel = self.env.resolve_boundary(self.positions[i], self.velocities[i], dt)
+            self.positions[i] = new_pos
+            self.velocities[i] = new_vel
 
         # Hard Collision Resolution
         self.resolve_collisions()
 
     def resolve_collisions(self):
-        if not self.obstacles:
+        if not self.env.obstacles:
             return
 
-        obs_centers = [(obs.centerx, obs.centery) if hasattr(obs, 'centerx') else obs for obs in self.obstacles]
-        obs_array = np.array(obs_centers)
+        obs_centers = np.array([[ob[0], ob[1]] for ob in self.env.obstacles])
+        obs_radii = np.array([ob[2] for ob in self.env.obstacles])
+        
         # Check all boids against all obstacles
-        # pos (N, 1, 2) - obs (1, M, 2)
-        diff = self.positions[:, np.newaxis, :] - obs_array[np.newaxis, :, :]
+        diff = self.positions[:, np.newaxis, :] - obs_centers[np.newaxis, :, :]
         dist = np.linalg.norm(diff, axis=2) # (N, M)
         
         # Find collisions
-        # Collision radius = obstacle_radius + safety_margin (e.g. 5 for boid size)
-        collision_radius = config.obstacle_radius + 5
+        # Collision radius = obstacle_radius + boid_size (e.g. 5)
+        collision_radius = obs_radii[np.newaxis, :] + 5
         collisions = dist < collision_radius
         
         # If any collision exists
         if np.any(collisions):
-            # For each boid, find the closest obstacle it collided with (if any)
-            # This is a bit simplified, handling multiple simultaneous collisions is hard
-            # We just take the first one or iterate.
-            
-            # Get indices of (boid_idx, obs_idx) having collision
             boid_indices, obs_indices = np.where(collisions)
             
             for boid_idx, obs_idx in zip(boid_indices, obs_indices):
-                # Vector from obstacle to boid
-                vec = self.positions[boid_idx] - obs_array[obs_idx]
+                # Vector from obstacle center to boid
+                vec = self.positions[boid_idx] - obs_centers[obs_idx]
                 d = np.linalg.norm(vec)
                 
-                if d == 0: # Exact overlap, push random
+                if d == 0: 
                     vec = np.random.randn(2)
                     d = np.linalg.norm(vec)
                 
-                # Normalize
                 normal = vec / d
-                
-                # Push out
-                overlap = collision_radius - d
+                overlap = collision_radius[0, obs_idx] - d
                 self.positions[boid_idx] += normal * overlap
                 
-                # Reflect velocity: v' = v - 2 * (v . n) * n
                 v = self.velocities[boid_idx]
                 dot = np.dot(v, normal)
-                
-                # Only reflect if moving towards the obstacle
                 if dot < 0:
                     self.velocities[boid_idx] = v - 2 * dot * normal
 
