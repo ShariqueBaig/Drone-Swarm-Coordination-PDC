@@ -1,0 +1,17 @@
+world:
+  width: 1000
+  height: 1000
+  boundary: hard-wall
+  boundary_margin: 50
+  boundary_repulsion_strength: 1000.0
+
+simulation:
+  dt: 0.02
+  seed: 42
+  num_drones: 100
+
+obstacles:
+  - [200, 300, 50]
+  - [600, 400, 30]
+  - [350, 200, 45]
+  - [700, 650, 60]
