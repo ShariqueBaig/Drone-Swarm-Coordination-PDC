@@ -28,6 +28,13 @@ Ashhal is responsible for **Optimization & Parallelism**. His contributions ensu
 - **D1.4 (Performance Logging):** Developed a comprehensive benchmarking suite (`performance_logger.py`) that tracks real-time FPS, CPU, and memory metrics, outputting data for analysis.
 - **D1.5 (Vectorization Baseline):** Ensured all optimization modules utilize NumPy broadcasting to maximize data parallelism.
 
+## What Usman Has Done
+Usman is responsible for the **Visualization & UI/UX**. His contributions bring the swarm to life and provide interactive debugging tools:
+
+- **C1.1 & C1.2 (Foundation & Drone Rendering):** Built the standalone Pygame rendering loop (`visualizer.py`), drawing the environment, obstacles, and the drones themselves (along with their heading vectors).
+- **C1.3 (Neighbor Awareness Viz):** Highlighted a specific drone and dynamically drew connections to its detected neighbors, visually proving the correctness of the spatial grid.
+- **C1.4 & C1.5 (UI & Interactive Controls):** Added a real-time HUD overlay showing FPS, live drone count, and simulation state. Implemented `SPACE` bar controls to pause/resume the simulation on the fly.
+
 ## Project Structure & Team Contracts
 The codebase has been refactored to meet the modular architecture agreed upon by the team (Usman's contract):
 
