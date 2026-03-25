@@ -296,7 +296,7 @@ def draw_controls_hint(surface, font_sm, sh):
 # ─────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
-def run_viz(swarm_mgr, env):
+def run_viz(swarm_mgr, env, logger=None):
     """C1.1 — main loop. Called by main.py as run_viz(swarm_mgr, env)."""
     pygame.init()
     SW, SH = env.width, env.height
@@ -320,6 +320,10 @@ def run_viz(swarm_mgr, env):
 
     running = True
     while running:
+
+        # 1. Start the frame timer
+        if logger:
+            logger.start_frame()
 
         # Events
         for event in pygame.event.get():
@@ -405,6 +409,10 @@ def run_viz(swarm_mgr, env):
 
         pygame.display.flip()
         clock.tick(60)
+
+        if logger:
+            # Pass the swarm_mgr so the logger can read drone counts/methods
+            logger.end_frame(swarm_mgr)
 
     pygame.quit()
     sys.exit(0)
