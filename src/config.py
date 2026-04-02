@@ -31,6 +31,10 @@ alignment_weight  = 1.0
 cohesion_weight   = 1.0
 obstacle_weight   = 1.6       # reduced for tighter maneuverability
 boundary_weight   = 1.0
+predictive_weight = 1.15
+predictive_horizon = 0.35
+predictive_safety_distance = 32
+predictive_obstacle_margin = 18
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 BACKGROUND_COLOR = (30, 30, 30)

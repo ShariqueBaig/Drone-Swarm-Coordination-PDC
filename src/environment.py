@@ -42,6 +42,12 @@ class Environment:
         self.num_drones = 100
 
         self.obstacles = [(200, 300, 50), (600, 400, 30)]
+        self.dynamic_obstacles = []
+
+        self.hot_reload_enabled = True
+        self.reload_check_interval = 30
+        self._reload_counter = 0
+        self._config_mtime = None
 
         # Obstacle cache
         self._obs_centers_cache = None
@@ -53,14 +59,15 @@ class Environment:
 
     # ── Obstacle cache ────────────────────────────────────────────────────
     def _rebuild_obstacle_cache(self):
-        if not self.obstacles:
+        all_obstacles = self.get_all_obstacles()
+        if not all_obstacles:
             self._obs_centers_cache = np.empty((0, 2), dtype=np.float64)
             self._obs_radii_cache   = np.empty((0,),   dtype=np.float64)
         else:
             self._obs_centers_cache = np.array(
-                [[ob[0], ob[1]] for ob in self.obstacles], dtype=np.float64)
+                [[ob[0], ob[1]] for ob in all_obstacles], dtype=np.float64)
             self._obs_radii_cache   = np.array(
-                [ob[2] for ob in self.obstacles], dtype=np.float64)
+                [ob[2] for ob in all_obstacles], dtype=np.float64)
         self._obs_dirty = False
 
     @property
@@ -82,6 +89,75 @@ class Environment:
     def remove_obstacle(self, index):
         self.obstacles.pop(index)
         self._obs_dirty = True
+
+    def get_all_obstacles(self):
+        if not self.dynamic_obstacles:
+            return list(self.obstacles)
+
+        dynamic_as_tuples = [
+            (ob["x"], ob["y"], ob["r"]) for ob in self.dynamic_obstacles
+        ]
+        return list(self.obstacles) + dynamic_as_tuples
+
+    def _update_dynamic_obstacles(self, delta_t):
+        if not self.dynamic_obstacles:
+            return
+
+        moved = False
+        for ob in self.dynamic_obstacles:
+            x = ob["x"] + ob["vx"] * delta_t
+            y = ob["y"] + ob["vy"] * delta_t
+            r = ob["r"]
+
+            if x - r < 0:
+                x = r
+                ob["vx"] *= -1.0
+            elif x + r > self.width:
+                x = self.width - r
+                ob["vx"] *= -1.0
+
+            if y - r < 0:
+                y = r
+                ob["vy"] *= -1.0
+            elif y + r > self.height:
+                y = self.height - r
+                ob["vy"] *= -1.0
+
+            ob["x"] = x
+            ob["y"] = y
+            moved = True
+
+        if moved:
+            self._obs_dirty = True
+
+    def _update_config_mtime(self):
+        if os.path.exists(self.config_path):
+            self._config_mtime = os.path.getmtime(self.config_path)
+
+    def _maybe_reload_config(self):
+        if not self.hot_reload_enabled or not os.path.exists(self.config_path):
+            return
+
+        current_mtime = os.path.getmtime(self.config_path)
+        if self._config_mtime is None:
+            self._config_mtime = current_mtime
+            return
+
+        if current_mtime > self._config_mtime:
+            self._load_config()
+            self._config_mtime = current_mtime
+            self._obs_dirty = True
+
+    def update(self, delta_t=None):
+        if delta_t is None:
+            delta_t = self.dt
+
+        self._reload_counter += 1
+        if self._reload_counter >= self.reload_check_interval:
+            self._maybe_reload_config()
+            self._reload_counter = 0
+
+        self._update_dynamic_obstacles(delta_t)
 
     # ── Vectorized batch boundary resolution ─────────────────────────────
     def resolve_boundary_batch(self, positions, velocities, delta_t=None):
@@ -191,6 +267,7 @@ class Environment:
         world    = cfg.get("world", {})
         sim_cfg  = cfg.get("simulation", {})
         obstacles = cfg.get("obstacles")
+        dynamic_obstacles = cfg.get("dynamic_obstacles")
 
         self.width  = int(world.get("width",  self.width))
         self.height = int(world.get("height", self.height))
@@ -202,6 +279,10 @@ class Environment:
         self.dt         = float(sim_cfg.get("dt",         self.dt))
         self.seed       = int(sim_cfg.get("seed",         self.seed))
         self.num_drones = int(sim_cfg.get("num_drones",   self.num_drones))
+        self.hot_reload_enabled = bool(
+            sim_cfg.get("hot_reload_enabled", self.hot_reload_enabled))
+        self.reload_check_interval = int(
+            sim_cfg.get("reload_check_interval", self.reload_check_interval))
 
         if obstacles:
             cleaned = []
@@ -213,6 +294,24 @@ class Environment:
                 cleaned.append((x, y, r))
             if cleaned:
                 self.obstacles = cleaned
+
+        if dynamic_obstacles:
+            cleaned_dyn = []
+            for ob in dynamic_obstacles:
+                if not isinstance(ob, dict):
+                    continue
+                if not all(k in ob for k in ("x", "y", "r")):
+                    continue
+                cleaned_dyn.append({
+                    "x": float(ob["x"]),
+                    "y": float(ob["y"]),
+                    "r": float(ob["r"]),
+                    "vx": float(ob.get("vx", 0.0)),
+                    "vy": float(ob.get("vy", 0.0)),
+                })
+            self.dynamic_obstacles = cleaned_dyn
+
+        self._update_config_mtime()
 
     def clamp_position(self, x, y):
         return max(0, min(self.width, x)), max(0, min(self.height, y))

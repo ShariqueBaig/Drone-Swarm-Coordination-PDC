@@ -88,14 +88,8 @@ class SwarmManagerOptimized:
     # ── Internal helper: refresh obstacle cache ──────────────────────────
     def _refresh_obs_cache(self):
         """Called once at the top of update(). Replaces 6 per-call rebuilds."""
-        if self.env.obstacles:
-            self._obs_c = np.array([[ob[0], ob[1]] for ob in self.env.obstacles],
-                                    dtype=np.float64)
-            self._obs_r = np.array([ob[2] for ob in self.env.obstacles],
-                                    dtype=np.float64)
-        else:
-            self._obs_c = np.empty((0, 2), dtype=np.float64)
-            self._obs_r = np.empty((0,),   dtype=np.float64)
+        self._obs_c = self.env.obs_centers.copy()
+        self._obs_r = self.env.obs_radii.copy()
 
     # ════════════════════════════════════════════════════════════════════════
     # NEIGHBOR DETECTION
@@ -233,6 +227,40 @@ class SwarmManagerOptimized:
         coh_f = coh_f / nc_s - self.positions
 
         return self.steer(sep_f), self.steer(aln_f / nc_s, True), self.steer(coh_f, True)
+
+    def _compute_predictive_avoidance(self, dt):
+        """A2.2: forward-project boids and apply preemptive avoidance."""
+        horizon = max(float(getattr(config, "predictive_horizon", 0.35)), dt)
+        pred_pos = self.positions + self.velocities * horizon
+
+        # Predictive drone-drone threats.
+        ddiff = pred_pos[:, np.newaxis, :] - pred_pos[np.newaxis, :, :]
+        ddist = np.linalg.norm(ddiff, axis=2)
+        np.fill_diagonal(ddist, np.inf)
+
+        d_safe = float(getattr(config, "predictive_safety_distance",
+                               config.safety_distance * 1.2))
+        d_threat = ddist < d_safe
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            d_rep = ddiff / np.maximum(ddist[:, :, np.newaxis], 1e-9)
+        d_rep[~d_threat] = 0.0
+        drone_avoid = np.sum(d_rep, axis=1)
+
+        # Predictive drone-obstacle threats.
+        obs_avoid = np.zeros((self.num_boids, 2))
+        if len(self._obs_c):
+            odiff = pred_pos[:, np.newaxis, :] - self._obs_c[np.newaxis, :, :]
+            odist = np.linalg.norm(odiff, axis=2)
+            o_margin = float(getattr(config, "predictive_obstacle_margin", 18.0))
+            o_threat = odist < (self._obs_r[np.newaxis, :] + o_margin)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                o_rep = odiff / np.maximum(odist[:, :, np.newaxis], 1e-9)
+            o_rep[~o_threat] = 0.0
+            obs_avoid = np.sum(o_rep, axis=1)
+
+        pred = self.steer(drone_avoid + obs_avoid)
+        return pred
 
     # ════════════════════════════════════════════════════════════════════════
     # OBSTACLE AVOIDANCE — tangential slide
@@ -709,6 +737,9 @@ class SwarmManagerOptimized:
             sep_s[alive] * config.separation_weight +
             aln_s[alive] * config.alignment_weight  +
             coh_s[alive] * config.cohesion_weight * coh_scale[alive, np.newaxis])
+
+        pred_s = self._compute_predictive_avoidance(dt)
+        self.accelerations[alive] += pred_s[alive] * getattr(config, "predictive_weight", 1.15)
 
         # Obstacle avoidance + clearance gradient
         obs_s = self._compute_obstacle_steer()

@@ -360,12 +360,19 @@ def run_viz(swarm_mgr, env, logger=None):
                     pan_active = True; pan_origin = event.pos
                 elif event.button == 1:
                     wx, wy = camera.s2w(event.pos)
-                    env.obstacles.append((wx, wy, NEW_OBS_RADIUS))
+                    if hasattr(env, 'add_obstacle'):
+                        env.add_obstacle(wx, wy, NEW_OBS_RADIUS)
+                    else:
+                        env.obstacles.append((wx, wy, NEW_OBS_RADIUS))
                 elif event.button == 3:
                     wx, wy = camera.s2w(event.pos)
                     for idx, (ox,oy,r) in enumerate(env.obstacles):
                         if np.hypot(wx-ox, wy-oy) <= r:
-                            env.obstacles.pop(idx); break
+                            if hasattr(env, 'remove_obstacle'):
+                                env.remove_obstacle(idx)
+                            else:
+                                env.obstacles.pop(idx)
+                            break
 
             elif event.type == pygame.MOUSEBUTTONUP:
                 if event.button == 2: pan_active = False
@@ -383,6 +390,8 @@ def run_viz(swarm_mgr, env, logger=None):
 
         # Physics
         if not paused:
+            if hasattr(env, 'update'):
+                env.update(config.dt * time_scale)
             swarm_mgr.update(config.dt * time_scale)
             pair_timer += 1
             if pair_timer >= PAIR_INTERVAL:
@@ -394,7 +403,8 @@ def run_viz(swarm_mgr, env, logger=None):
         # Render
         screen.fill(C_BG)
         draw_boundary(screen, env, camera)
-        draw_obstacles(screen, env.obstacles, camera)
+        all_obs = env.get_all_obstacles() if hasattr(env, 'get_all_obstacles') else env.obstacles
+        draw_obstacles(screen, all_obs, camera)
 
         nc        = getattr(swarm_mgr, 'neighbor_counts', None)
         dead_mask = getattr(swarm_mgr, 'dead_mask', None)
