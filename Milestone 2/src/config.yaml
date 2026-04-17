@@ -11,11 +11,12 @@ simulation:
   num_drones: 100
 
 # A1.2 — Static obstacles [x, y, radius]
+# Positioned away from task generation area to avoid visual overlap
 obstacles:
-  - [200, 300, 50]
-  - [600, 400, 30]
-  - [350, 200, 45]
-  - [700, 650, 60]
+  - [150, 850, 40]
+  - [850, 150, 35]
+  - [100, 500, 45]
+  - [900, 500, 55]
 
 # A2.3 — Dynamic (moving) obstacles [x, y, radius, vx, vy]
 # Two moving obstacles to test predictive avoidance (A2.2)
