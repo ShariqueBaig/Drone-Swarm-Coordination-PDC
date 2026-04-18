@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  drone-swarm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: drone-swarm-sim
+    image: drone-swarm:latest
+    
+    # Resource limits optimized for CPU-only systems
+    # 4GB memory, 4 cores
+    mem_limit: 4g
+    memswap_limit: 4g
+    cpus: 4
+    cpu_shares: 1024
+    
+    # Display and X11 socket for GUI rendering
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - RAY_memory=1000000000
+      - RAY_object_store_memory=500000000
+    
+    # Mount X11 socket for display
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${HOME}/.Xauthority:/root/.Xauthority:ro
+      - ./logs:/app/logs
+      - ./benchmarks:/app/benchmarks
+      - ./results:/app/results
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Stdout/stderr logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Headless benchmarking service (CPU-only)
+  drone-swarm-benchmark:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: drone-swarm-benchmark
+    image: drone-swarm:latest
+    
+    mem_limit: 4g
+    cpus: 4
+    
+    environment:
+      - RAY_memory=1000000000
+      - RAY_object_store_memory=500000000
+      - HEADLESS=1
+    
+    volumes:
+      - ./benchmarks:/app/benchmarks
+      - ./results:/app/results
+      - ./logs:/app/logs
+    
+    # Run benchmark script
+    command: ["python3", "benchmark_container.py"]
+    
+    depends_on:
+      - drone-swarm
+    
+    profiles:
+      - benchmark
+
+volumes:
+  drone-swarm-logs:
+  drone-swarm-benchmarks:
+  drone-swarm-results:

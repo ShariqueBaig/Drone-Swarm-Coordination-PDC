@@ -1,0 +1,37 @@
+.git
+.gitignore
+.env
+.venv
+__pycache__
+.pytest_cache
+.vscode
+.idea
+*.pyc
+*.pyo
+*.egg-info
+dist/
+build/
+.DS_Store
+*.log
+*.csv
+.coverage
+htmlcov/
+node_modules/
+env/
+venv/
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.iml
+.mypy_cache/
+.dmypy.json
+dmypy.json
+*.egg
+*.whl
+.env.local
+.env.*.local
+src/__pycache__/
+"Milestone 1/__pycache__/"
+"Milestone 2/__pycache__/"
