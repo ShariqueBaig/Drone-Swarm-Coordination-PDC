@@ -58,7 +58,9 @@ editor_cam.position = Vec3(W/2, 550, -750)
 editor_cam.rotation = (26, 0, 0)
 camera.clip_plane_far = 20000
 cinematic_mode = False
-CAM_PAN = 220           # units / sec for arrow-key pan
+CAM_PAN  = 220          # units / sec for arrow-key pan
+CAM_ZOOM = 600          # units / sec for zoom (= / - keys)
+CAM_SCROLL = 220        # units per scroll tick
 
 # ── LIGHTING ──────────────────────────────────────────────────────────────────
 d_light = DirectionalLight(parent=scene, y=8, z=4, color=rgb(160, 185, 255))
@@ -197,6 +199,7 @@ for i in range(swarm.num_boids):
     drone.trail_verts = []
     drone.trail = Entity(model=Mesh(vertices=[], mode='line', thickness=2),
                          color=rgb(0, 145, 220, 185), unlit=True)
+    drone._prev_color_key = ''   # dirty-flag: skip redundant GPU color sets
     
     # Behavior Glow Ring (Micro-Indicator)
     e_ring = Entity(parent=drone, model='circle', scale=2.0, rotation_x=90, y=-0.5,
@@ -265,16 +268,16 @@ controls_text = Text(
          '1/2/3 : Algo      L : Lines\n'
          'T : Trails        H : Map\n'
          'O : Obs Mode      R : Reset\n'
-         'C : Cinematic\n'
-         'W/A/S/D : Pan XZ  Q/E: Pan Y\n'
+         'C : Cinematic     G : Center\n'
+         'W/A/S/D : Pan XZ  Q/E : Pan Y\n'
+         '= : Zoom In       - : Zoom Out\n'
+         'Scroll Wheel : Zoom (fast)\n'
          'L-Click Floor: Set Waypoint\n'
          'R-Click: Clear Waypoint\n'
-         'G : Center Toggle\n'
-         'P : Export CSV\n'
-         '[Obs] Arrow Up/Down: Height\n'
-         '[Obs] L-Click: Place  M: Move\n'
-         'V : Diagnostic Mode',
-    position=(-0.89, -0.21), scale=0.72, color=color.azure
+         'P : Export CSV    V : Diagnostics\n'
+         '[Obs] Up/Down: Height  M: Move\n'
+         '[Obs] L-Click: Place   R-Click: Undo',
+    position=(-0.89, -0.21), scale=0.65, color=color.azure
 )
 
 show_vectors = False
@@ -412,11 +415,14 @@ def update():
     _t = time.time()
     cov_pct = swarm.coverage_pct # Define here for logic visibility
 
-    # Camera keyboard pan (WASD relative to view, QE for Y)
-    ep = editor_cam.position
+    # Camera keyboard pan (WASD relative to view, QE for Y) + zoom (= / -)
     try:
         y_rot = math.radians(editor_cam.rotation_y)
-        fwd = Vec3(math.sin(y_rot), 0, math.cos(y_rot))
+        x_rot = math.radians(editor_cam.rotation_x)
+        # True 3D forward vector including vertical tilt
+        fwd   = Vec3(math.sin(y_rot) * math.cos(x_rot),
+                     -math.sin(x_rot),
+                     math.cos(y_rot) * math.cos(x_rot))
         right = Vec3(math.cos(y_rot), 0, -math.sin(y_rot))
     except:
         fwd, right = Vec3(0,0,1), Vec3(1,0,0)
@@ -427,6 +433,9 @@ def update():
     if held_keys['s']:   editor_cam.position -= fwd * CAM_PAN * time.dt
     if held_keys['e']:   editor_cam.position += Vec3(0, CAM_PAN * time.dt, 0)
     if held_keys['q']:   editor_cam.position -= Vec3(0, CAM_PAN * time.dt, 0)
+    # Zoom: move along true forward axis (= zoom-in, - zoom-out)
+    if held_keys['=']:   editor_cam.position += fwd * CAM_ZOOM * time.dt
+    if held_keys['-']:   editor_cam.position -= fwd * CAM_ZOOM * time.dt
 
     # Waypoint pulse
     if waypoint_marker.enabled:
@@ -522,42 +531,41 @@ def update():
         if show_vectors:
             # Behavior Glow (Micro-Indicator)
             forces = [
-                (np.linalg.norm(swarm.last_sep[i]), rgb(255, 60, 60)),     # Red
-                (np.linalg.norm(swarm.last_aln[i]), rgb(255, 255, 60)),    # Yellow
-                (np.linalg.norm(swarm.last_coh[i]), rgb(60, 255, 60)),     # Green
-                (np.linalg.norm(swarm.last_waypoint[i]), rgb(60, 210, 255)) # Azure
+                (np.linalg.norm(swarm.last_sep[i]), rgb(255, 60, 60)),
+                (np.linalg.norm(swarm.last_aln[i]), rgb(255, 255, 60)),
+                (np.linalg.norm(swarm.last_coh[i]), rgb(60, 255, 60)),
+                (np.linalg.norm(swarm.last_waypoint[i]), rgb(60, 210, 255))
             ]
             mag_max, col_max = max(forces, key=lambda x: x[0])
             if mag_max > 0.08:
-                # Color slicing fix: Color is a Vec4/tuple, use individual attributes
                 e.behavior_ring.color = color.rgba(col_max.r, col_max.g, col_max.b, min(0.4, mag_max*0.5))
             else:
                 e.behavior_ring.color = color.clear
-            
-            # Keep original colors in vector mode for fleet context
-            e.color = rgb(0, 210, 255)
-            e.scale = 7
+            # dirty-flag: only write color/scale if changed
+            if e._prev_color_key != 'vec':
+                e.color = rgb(0, 210, 255); e.scale = 7
+                e._prev_color_key = 'vec'
         else:
             e.behavior_ring.color = color.clear
             if h_id != -1:
                 if swarm.mission_type[i] == h_id:
-                    e.color = color.white
-                    e.scale = 10
-                    e.unlit = True
+                    _ck = 'sel'
+                    if e._prev_color_key != _ck:
+                        e.color = color.white; e.scale = 10; e.unlit = True
+                        e._prev_color_key = _ck
                 else:
-                    e.color = rgb(40, 45, 50, 150)
-                    e.scale = 6
-                    e.unlit = False
+                    _ck = 'dim'
+                    if e._prev_color_key != _ck:
+                        e.color = rgb(40, 45, 50, 150); e.scale = 6; e.unlit = False
+                        e._prev_color_key = _ck
             else:
-                e.color = rgb(0, 210, 255)
-                e.scale = 7
-                e.unlit = False
+                if e._prev_color_key != 'norm':
+                    e.color = rgb(0, 210, 255); e.scale = 7; e.unlit = False
+                    e._prev_color_key = 'norm'
 
         if spd > 0.5:
             e.look_at(p3 + Vec3(vel[0], vel[1], vel[2]))
-        
-        if hasattr(e, 'children') and len(e.children) > 0:
-            e.children[0].color = rgb(160, 235, 255)
+        # NOTE: children[0] color is set at creation and never changes — removed from hot loop
 
         # Trail
         if do_trail:
@@ -660,67 +668,52 @@ def update():
         mission_type = btn_mission_map[i] if i < len(btn_mission_map) else i
         btn.color = rgb(100, 150, 180, 100) if highlighted_mission[0] == mission_type else (rgb(60, 80, 60, 50) if i == 4 else rgb(60, 60, 60, 50))
 
-    # M3: Update Area Coverage Tracking & Telemetry (Reads from Brain)
+    # M3: Update Area Coverage Tracking & Telemetry
     if _frame[0] % 2 == 0:
         global log_timer
-        # Read coverage status from the Swarm Manager logic
         current_vis = np.sum(swarm.visited_grid)
         cov_pct = (current_vis / (swarm.grid_res**3)) * 100
         coverage_text.text = f'COVERAGE: {cov_pct:.1f}%'
 
-        # Telemetry Snapshot (every ~1 second)
-        # M3: Update Area Coverage Tracking & Telemetry (Optimized Brain-Link)
-        if _frame[0] % 2 == 0:
-            global log_timer
-            # cov_pct already updated at top of loop
-            coverage_text.text = f'COVERAGE: {cov_pct:.1f}%'
-
-            # Discovery Visuals (Cyan Pulse on new voxels)
-            if show_heatmap or show_vectors: # Pulse when heatmap OR diagnostics are ON
-                new_voxels = np.argwhere(swarm.visited_grid & ~swarm.last_grid)
-                if len(new_voxels) > 0:
-                    voxel_size = np.array([W/swarm.grid_res, H/swarm.grid_res, D/swarm.grid_res])
-                    for v in new_voxels:
-                        pos = v * voxel_size + (voxel_size/2)
-                        
-                        # Add to persistent heatmap if enabled
-                        if show_heatmap:
-                            hmap_verts.append(Vec3(*pos))
-                            hmap_colors.append(rgb(0, 210, 255, 40)) 
-                        
-                        # High-Visual Discovery Pulse (Capped for performance)
-                        if len(hmap_verts) % 5 == 0: # Only pulse occasionally
-                            DiscoveryPulse(pos)
-                    
+        # Discovery Visuals (Cyan Pulse on new voxels)
+        if show_heatmap or show_vectors:
+            new_voxels = np.argwhere(swarm.visited_grid & ~swarm.last_grid)
+            if len(new_voxels) > 0:
+                voxel_size = np.array([W/swarm.grid_res, H/swarm.grid_res, D/swarm.grid_res])
+                for v in new_voxels:
+                    pos = v * voxel_size + (voxel_size/2)
                     if show_heatmap:
-                        hmap_ent.model.vertices = hmap_verts
-                        hmap_ent.model.colors = hmap_colors
-                        hmap_ent.model.generate()
-                    
-                    # Update Scanning Plane position relative to latest search
-                    scan_plane.enabled = True
-                    scan_plane.y = (H/2) + math.sin(_t*0.5) * (H/2)
-                    scan_plane.color = rgb(0, 210, 255, 10 + 10*math.sin(_t*8))
-            else:
-                scan_plane.enabled = False
+                        hmap_verts.append(Vec3(*pos))
+                        hmap_colors.append(rgb(0, 210, 255, 40))
+                    if len(hmap_verts) % 5 == 0:
+                        DiscoveryPulse(pos)
+                if show_heatmap:
+                    hmap_ent.model.vertices = hmap_verts
+                    hmap_ent.model.colors = hmap_colors
+                    hmap_ent.model.generate()
+                scan_plane.enabled = True
+                scan_plane.y = (H/2) + math.sin(_t*0.5) * (H/2)
+                scan_plane.color = rgb(0, 210, 255, 10 + 10*math.sin(_t*8))
+        else:
+            scan_plane.enabled = False
 
-            # Telemetry Snapshot (every ~1 second)
-            if _t > log_timer:
-                log_timer = _t + 1.0
-                metrics_log.append({
-                    'Time': round(_t - app.start_time, 1),
-                    'Coverage': round(cov_pct, 2),
-                    'Active': active_count,
-                    'Dead': int(np.sum(swarm.dead_mask)),
-                    'Collisions': swarm.collision_count
-                })
-            
-            # Mission Complete Detection
-            if cov_pct > 99.5 and not mission_banner.enabled:
-                mission_banner.enabled = True
-                mission_banner.animate_color(rgb(20, 180, 255, 180), duration=2)
-                if hasattr(swarm, 'recall_fleet'): swarm.recall_fleet()
-                save_metrics_csv() 
+        # Telemetry Snapshot (every ~1 second)
+        if _t > log_timer:
+            log_timer = _t + 1.0
+            metrics_log.append({
+                'Time': round(_t - app.start_time, 1),
+                'Coverage': round(cov_pct, 2),
+                'Active': active_count,
+                'Dead': int(np.sum(swarm.dead_mask)),
+                'Collisions': swarm.collision_count
+            })
+
+        # Mission Complete Detection
+        if cov_pct > 99.5 and not mission_banner.enabled:
+            mission_banner.enabled = True
+            mission_banner.animate_color(rgb(20, 180, 255, 180), duration=2)
+            if hasattr(swarm, 'recall_fleet'): swarm.recall_fleet()
+            save_metrics_csv() 
 
     # Formation Centroid & Global Center Viz (C2.2)
     if active_count > 0:
@@ -820,6 +813,7 @@ def update():
         
         for e in boid_entities:
             e.color = rgb(0, 210, 255); e.y = 0; e.rotation_x = 0
+            e._prev_color_key = ''   # reset dirty-flag so colors re-evaluate
             e.trail_verts.clear()
             e.trail.model.vertices = []; e.trail.model.generate()
         for d in radar_dots: d.color = rgb(0, 215, 255)
@@ -851,11 +845,24 @@ def input(key):
     global show_neighbor_lines, show_heatmap, show_trails, show_vectors, show_centroid
     global obs_ghost, obs_height, static_obs_ents, user_added, user_moving_obs, _initial_static_count
 
+    # ── Scroll-wheel zoom: move camera along its true 3-D forward vector ──
+    if key in ('scroll up', 'scroll down'):
+        try:
+            y_rot = math.radians(editor_cam.rotation_y)
+            x_rot = math.radians(editor_cam.rotation_x)
+            cam_fwd = Vec3(math.sin(y_rot) * math.cos(x_rot),
+                           -math.sin(x_rot),
+                           math.cos(y_rot) * math.cos(x_rot))
+            sign = 1 if key == 'scroll up' else -1
+            editor_cam.position += cam_fwd * CAM_SCROLL * sign
+        except:
+            pass
+        return  # consumed
+
     # Debug Force Vectors
     if key == 'v':
         show_vectors = not show_vectors
         force_hud.enabled = show_vectors
-        # intent_indicator.enabled = show_vectors  # Removed for cleaner diagnostics
         print(f"[UI] Diagnostic Mode: {'ON' if show_vectors else 'OFF'}")
 
     # Algorithm switch
