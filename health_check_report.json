@@ -1,0 +1,93 @@
+{
+  "timestamp": "2026-04-18T11:58:01.660791",
+  "passed": 11,
+  "failed": 10,
+  "warnings": 0,
+  "status": "\u274c NOT READY",
+  "results": [
+    [
+      "Docker Installed",
+      "\u2705 PASS"
+    ],
+    [
+      "Docker Daemon Running",
+      "\u274c FAIL - Docker daemon not accessible"
+    ],
+    [
+      "Docker Compose Installed",
+      "\u2705 PASS"
+    ],
+    [
+      "NVIDIA GPU Available (Host)",
+      "\u274c FAIL - nvidia-smi not found"
+    ],
+    [
+      "NVIDIA Docker Support",
+      "\u274c FAIL - nvidia-docker not configured"
+    ],
+    [
+      "NVIDIA Container Runtime",
+      "\u274c FAIL - nvidia-container-runtime not installed"
+    ],
+    [
+      "Python 3 Installed",
+      "\u274c FAIL - Python was not found; run without arguments to install from the Microsoft Store, or disable this shortcut from Settings > Apps > Advanced app settings > App execution aliases."
+    ],
+    [
+      "Package: psutil",
+      "\u274c FAIL - System monitoring not installed"
+    ],
+    [
+      "Package: numpy",
+      "\u274c FAIL - Numerical computing not installed"
+    ],
+    [
+      "Package: GPUtil",
+      "\u274c FAIL - GPU monitoring not installed"
+    ],
+    [
+      "File: Dockerfile",
+      "\u2705 PASS"
+    ],
+    [
+      "File: docker-compose.yml",
+      "\u2705 PASS"
+    ],
+    [
+      "File: requirements.txt",
+      "\u2705 PASS"
+    ],
+    [
+      "File: benchmark_native.py",
+      "\u2705 PASS"
+    ],
+    [
+      "File: benchmark_container.py",
+      "\u2705 PASS"
+    ],
+    [
+      "File: compare_benchmarks.py",
+      "\u2705 PASS"
+    ],
+    [
+      "File: DOCKER_GUIDE.md",
+      "\u2705 PASS"
+    ],
+    [
+      "File: QUICKSTART.md",
+      "\u2705 PASS"
+    ],
+    [
+      "Milestone 2 source structure",
+      "\u2705 PASS"
+    ],
+    [
+      "docker-compose.yml Valid",
+      "\u274c FAIL - The system cannot find the path specified."
+    ],
+    [
+      "Matrix Computation Performance",
+      "\u274c FAIL - performance test failed"
+    ]
+  ]
+}
