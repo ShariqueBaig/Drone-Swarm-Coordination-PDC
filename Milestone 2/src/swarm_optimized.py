@@ -33,8 +33,6 @@ OTHER FIXES:
 import numpy as np
 import config
 from scipy.spatial import cKDTree
-from spatial_grid import SpatialGrid      # Ashhal's original — kept for reference
-from quadtree import QuadTree             # Ashhal's original — kept for reference
 from performance_logger import PerformanceLogger
 
 # Drone body radius for hard collision detection (world units)
@@ -57,11 +55,6 @@ class SwarmManagerOptimized:
         self.velocities  = (np.random.rand(self.num_boids, 2) - 0.5) * config.max_speed
         self.accelerations = np.zeros((self.num_boids, 2))
 
-        # Ashhal's spatial structures (kept; KDTree used for perf, these for reference)
-        self.spatial_grid = SpatialGrid(
-            cell_size=config.perception_radius,
-            width=env.width, height=env.height)
-
         self.frame_count = 0
         self.logger      = PerformanceLogger("optimized_benchmark.csv")
         self.use_method  = 'grid'
@@ -70,8 +63,18 @@ class SwarmManagerOptimized:
         self.avg_neighbors   = 0.0
         self.neighbor_counts = np.zeros(self.num_boids)
         self.neighbor_mask   = np.zeros((self.num_boids, self.num_boids), dtype=bool)
-        # Dead drone tracking — visualizer colors these red and stops drawing them
+        # Dead drone tracking
         self.dead_mask       = np.zeros(self.num_boids, dtype=bool)
+
+        # ── M2: Task allocation state (B2.2–B2.4) ────────────────────────────
+        self.tasks = (
+            np.random.rand(10, 2)
+            * [env.width * 0.8, env.height * 0.8]
+            + [env.width * 0.1, env.height * 0.1]
+        )
+        self.assigned_tasks  = np.full(self.num_boids, -1, dtype=int)
+        self.bids            = np.full(self.num_boids, np.inf)
+        self.tasks_completed = 0
 
         # Circular-motion / stuck detection
         self._prev_positions = self.positions.copy()
@@ -81,7 +84,7 @@ class SwarmManagerOptimized:
         self._clear_dirs    = np.zeros((self.num_boids, 2))
         self._clear_block   = np.zeros(self.num_boids)
         self._clear_timer   = 0
-        self._HISTORY_FRAMES = 30   # check net progress every 30 frames (~0.5s)
+        self._HISTORY_FRAMES = 30
 
     # ──────────────────────────────────────────────────────────────────────────
     # NEIGHBOR DETECTION
@@ -108,34 +111,35 @@ class SwarmManagerOptimized:
     def find_neighbors_grid(self):
         """D1.2 — scipy cKDTree query_ball_point (C-implemented grid/hash).
 
-        query_ball_point returns a neighbor-list per point, equivalent to a
-        grid hash query. Results converted to a symmetric pairs array for
-        sparse force computation.
-
         FPS: ~3× faster than naive at N=100 (measured: 0.234ms vs 0.685ms).
+        Pair list built vectorized via np.concatenate — no Python inner loop.
         """
-        tree = cKDTree(self.positions)
+        tree     = cKDTree(self.positions)
         nb_lists = tree.query_ball_point(self.positions, config.perception_radius)
 
-        rows, cols = [], []
-        counts     = np.zeros(self.num_boids)
-        for i, nb in enumerate(nb_lists):
-            for j in nb:
-                if j > i:       # collect each pair once
-                    rows.append(i)
-                    cols.append(j)
-            counts[i] = len([j for j in nb if j != i])
-
-        pairs = (np.array(rows, dtype=int), np.array(cols, dtype=int))
+        # Build pairs vectorized
+        repeats = np.array([len(nb) for nb in nb_lists], dtype=int)
+        if repeats.sum() == 0:
+            pairs = (np.array([], dtype=int), np.array([], dtype=int))
+            counts = np.zeros(self.num_boids)
+        else:
+            ii_all = np.repeat(np.arange(self.num_boids), repeats)
+            jj_all = np.concatenate([np.array(nb, dtype=int) for nb in nb_lists])
+            # Remove self-pairs and keep each pair once (i < j)
+            keep   = ii_all < jj_all
+            ii, jj = ii_all[keep], jj_all[keep]
+            pairs  = (ii, jj)
+            counts = np.zeros(self.num_boids)
+            # count neighbors (excl. self) per drone
+            self_mask = ii_all != np.repeat(np.arange(self.num_boids), repeats)
+            np.add.at(counts, ii_all[self_mask], 1)
 
         self.neighbor_counts = counts
         self.avg_neighbors   = float(np.mean(counts))
 
-        # Build mask for visualizer (vectorized, not in the hot path)
         mask = np.zeros((self.num_boids, self.num_boids), dtype=bool)
-        if len(rows):
-            r, c = np.array(rows, dtype=int), np.array(cols, dtype=int)
-            mask[r, c] = mask[c, r] = True
+        if len(pairs[0]):
+            mask[pairs[0], pairs[1]] = mask[pairs[1], pairs[0]] = True
         self.neighbor_mask = mask
 
         return ('pairs', pairs)
@@ -547,18 +551,12 @@ class SwarmManagerOptimized:
     # ──────────────────────────────────────────────────────────────────────────
 
     def resolve_drone_drone_collisions(self):
-        """Push overlapping drones apart — NO death marking.
+        """Push overlapping drones apart — fully vectorized, no Python loops.
 
-        Milestone 1 goal is drones moving WITHOUT collisions — the Boids
-        separation force is supposed to prevent drone-drone contact.
-        Marking drone-drone contact as death is wrong for M1: at max_speed=250
-        the separation force cannot prevent every fast close-approach, causing
-        all 100 drones to die within seconds.
-
-        This method only pushes drones apart (elastic impulse).
-        Death only comes from obstacle or wall contact (see below).
+        Elastic impulse exchange along collision normal.
+        Death only from obstacle/wall — not drone-drone contact (M1/M2 spec).
         """
-        hard_r = _DRONE_BODY_R * 2.0   # two drone visual radii touching
+        hard_r = _DRONE_BODY_R * 2.0
 
         diff = self.positions[:, np.newaxis, :] - self.positions[np.newaxis, :, :]
         dist = np.linalg.norm(diff, axis=2)
@@ -571,99 +569,105 @@ class SwarmManagerOptimized:
         ii, jj = np.where(collisions)
         keep   = ii < jj
         ii, jj = ii[keep], jj[keep]
+        if len(ii) == 0:
+            return
 
-        for i, j in zip(ii, jj):
-            vec = self.positions[i] - self.positions[j]
-            d   = np.linalg.norm(vec)
-            if d < 1e-6:
-                angle = np.random.uniform(0, 2 * np.pi)
-                vec   = np.array([np.cos(angle), np.sin(angle)])
-                d     = 1.0
-            normal  = vec / d
-            overlap = (hard_r - d) / 2.0
-            self.positions[i] += normal * overlap
-            self.positions[j] -= normal * overlap
-            # Velocity exchange along normal (elastic)
-            rel = self.velocities[i] - self.velocities[j]
-            dot = np.dot(rel, normal)
-            if dot < 0:
-                self.velocities[i] -= dot * normal
-                self.velocities[j] += dot * normal
+        vecs    = self.positions[ii] - self.positions[jj]          # (M, 2)
+        d       = dist[ii, jj]                                     # (M,)
+
+        # Handle exact overlaps with random nudge
+        zero    = d < 1e-6
+        if np.any(zero):
+            angles       = np.random.uniform(0, 2 * np.pi, int(np.sum(zero)))
+            vecs[zero]   = np.stack([np.cos(angles), np.sin(angles)], axis=1)
+            d[zero]      = 1.0
+
+        normals = vecs / d[:, np.newaxis]                          # (M, 2)
+        overlap = (hard_r - d) / 2.0                              # (M,)
+
+        # Position correction (vectorized scatter)
+        np.add.at(self.positions, ii,  normals * overlap[:, np.newaxis])
+        np.add.at(self.positions, jj, -normals * overlap[:, np.newaxis])
+
+        # Velocity exchange along normal
+        rel = self.velocities[ii] - self.velocities[jj]           # (M, 2)
+        dot = np.sum(rel * normals, axis=1)                       # (M,)
+        impulse_mask = dot < 0
+        if np.any(impulse_mask):
+            imp = normals[impulse_mask] * dot[impulse_mask, np.newaxis]
+            np.add.at(self.velocities, ii[impulse_mask], -imp)
+            np.add.at(self.velocities, jj[impulse_mask],  imp)
 
     # ──────────────────────────────────────────────────────────────────────────
     # DRONE-OBSTACLE COLLISION
     # ──────────────────────────────────────────────────────────────────────────
 
     def resolve_drone_obstacle_collisions(self):
-        """Push drones out of obstacles. Marks drone DEAD if center enters body.
-
-        Two thresholds:
-          col_r = obs_radius + DRONE_BODY_R  — physical contact: push out + bounce
-          death_r = obs_radius               — center inside obstacle: mark dead
-
-        A drone that reaches the obstacle center has truly crashed.
-        A drone that just grazes the edge gets pushed out and lives.
-        """
+        """Push drones out of obstacles — fully vectorized. Marks drone DEAD if center deeply embedded."""
         if not self.env.obstacles:
             return
-        obs_c = np.array([[ob[0], ob[1]] for ob in self.env.obstacles])
-        obs_r = np.array([ob[2]          for ob in self.env.obstacles])
+        obs_c = np.array([[ob[0], ob[1]] for ob in self.env.obstacles], dtype=float)
+        obs_r = np.array([ob[2]          for ob in self.env.obstacles], dtype=float)
 
-        diff  = self.positions[:, np.newaxis, :] - obs_c[np.newaxis, :, :]
-        dist  = np.linalg.norm(diff, axis=2)
-        col_r = obs_r[np.newaxis, :] + _DRONE_BODY_R   # contact threshold
+        diff  = self.positions[:, np.newaxis, :] - obs_c[np.newaxis, :, :]   # (N,M,2)
+        dist  = np.linalg.norm(diff, axis=2)                                  # (N,M)
+        col_r = obs_r[np.newaxis, :] + _DRONE_BODY_R
 
         hits = dist < col_r
         if not np.any(hits):
             return
 
         bi, oi = np.where(hits)
-        for b, o in zip(bi, oi):
-            # Death: drone deeply embedded (center past halfway into body).
-            # Surface contact (dist < obs_r) gets pushed out and lives.
-            # Only kill when drone center is well inside (< 50% of radius).
-            if dist[b, o] < obs_r[o] * 0.5:
-                self.dead_mask[b] = True
-                continue
 
-            # Otherwise: push out + velocity bounce
-            vec = self.positions[b] - obs_c[o]
-            d   = np.linalg.norm(vec)
-            if d < 1e-6:
-                vec = np.random.randn(2); d = np.linalg.norm(vec)
-            n   = vec / d
-            self.positions[b] += n * (col_r[0, o] - d)  # col_r shape (1,M): axis 0 = 1
-            v   = self.velocities[b]
-            dot = np.dot(v, n)
-            if dot < 0:
-                self.velocities[b] = v - 2 * dot * n
+        # Death: drone center deeply inside obstacle (< 50% of radius)
+        deep = dist[bi, oi] < obs_r[oi] * 0.5
+        self.dead_mask[bi[deep]] = True
+
+        # Push-out for non-death hits
+        alive_hit = ~deep
+        if not np.any(alive_hit):
+            return
+
+        b_a = bi[alive_hit]
+        o_a = oi[alive_hit]
+
+        vecs = self.positions[b_a] - obs_c[o_a]                    # (K,2)
+        d    = np.linalg.norm(vecs, axis=1)                        # (K,)
+
+        # Handle exact center overlap
+        zero = d < 1e-6
+        if np.any(zero):
+            rnd          = np.random.randn(int(np.sum(zero)), 2)
+            norms        = np.linalg.norm(rnd, axis=1, keepdims=True)
+            vecs[zero]   = rnd / np.maximum(norms, 1e-9)
+            d[zero]      = 1.0
+
+        normals  = vecs / d[:, np.newaxis]                         # (K,2)
+        push_d   = col_r[0, o_a] - d                              # (K,)
+
+        # Scatter position correction (use np.add.at to handle duplicates)
+        np.add.at(self.positions, b_a, normals * push_d[:, np.newaxis])
+
+        # Velocity bounce along normal
+        vel_b = self.velocities[b_a]                               # (K,2)
+        dot   = np.sum(vel_b * normals, axis=1)                   # (K,)
+        inward = dot < 0
+        if np.any(inward):
+            np.add.at(
+                self.velocities, b_a[inward],
+                -2.0 * dot[inward, np.newaxis] * normals[inward]
+            )
 
     # ──────────────────────────────────────────────────────────────────────────
     # STUCK / CIRCULAR MOTION ESCAPE
     # ──────────────────────────────────────────────────────────────────────────
 
     def _apply_stuck_escape(self):
-        """Escape kick — ONLY for isolated drones near obstacles or walls.
+        """Escape kick for isolated drones near obstacles/walls — vectorized.
 
-        Root cause of oscillation: the previous version fired for ANY drone
-        with low net_disp, including drones inside a dense flock. Cohesion
-        forces naturally reduce net_disp in a tight cluster. The kick replaced
-        velocity entirely → cohesion pulled drone back → kick fired again at
-        next check → permanent back-and-forth oscillation at 15-frame frequency.
-
-        Correct semantics: escape is only for ISOLATED drones (no neighbors)
-        that are genuinely trapped near an obstacle or wall. Drones with
-        neighbors are in a flock — their slow progress is normal Boids behavior,
-        not a stuck condition.
-
-        Conditions to fire:
-          1. neighbor_count == 0  (truly isolated — no flock to guide it)
-          2. AND: speed < 3% max_speed (stopped) OR net_disp < 8 (truly static)
-          3. AND: near an obstacle or wall (within 1.5 × perception_radius)
-
-        Kick: += (additive, blends with existing velocity) pointing away from
-        the nearest obstacle/wall. Does NOT replace velocity.
-        Timer: 30 frames.
+        Only fires for drones with no neighbors that are truly stuck
+        (near stopped) near an obstacle or wall. Additive kick away from
+        nearest obstacle/wall. Never replaces velocity entirely.
         """
         self._history_timer += 1
         if self._history_timer < self._HISTORY_FRAMES:
@@ -672,13 +676,9 @@ class SwarmManagerOptimized:
         speeds   = np.linalg.norm(self.velocities, axis=1)
         net_disp = np.linalg.norm(self.positions - self._prev_positions, axis=1)
 
-        # Only isolated drones (no neighbors) — flocking drones are NOT stuck
         isolated = self.neighbor_counts == 0
+        stuck    = (speeds < config.max_speed * 0.03) | (net_disp < 8.0)
 
-        # Truly stuck: nearly stopped or barely moving over 30 frames
-        stuck = (speeds < config.max_speed * 0.03) | (net_disp < 8.0)
-
-        # Only near an obstacle or wall — open-space slow drones are fine
         W, H   = float(self.env.width), float(self.env.height)
         margin = config.perception_radius * 1.5
         near_wall = ((self.positions[:, 0] < margin) |
@@ -688,66 +688,74 @@ class SwarmManagerOptimized:
 
         near_obs = np.zeros(self.num_boids, dtype=bool)
         if self.env.obstacles:
-            obs_c = np.array([[ob[0], ob[1]] for ob in self.env.obstacles])
-            obs_r = np.array([ob[2] for ob in self.env.obstacles])
+            obs_c = np.array([[ob[0], ob[1]] for ob in self.env.obstacles], dtype=float)
+            obs_r = np.array([ob[2] for ob in self.env.obstacles], dtype=float)
             diffs = self.positions[:, np.newaxis, :] - obs_c[np.newaxis, :, :]
             dists = np.linalg.norm(diffs, axis=2)
             near_obs = np.any(dists < (obs_r[np.newaxis, :] + margin), axis=1)
 
-        escape = isolated & stuck & (near_wall | near_obs) & ~self.dead_mask
+        escape_mask = isolated & stuck & (near_wall | near_obs) & ~self.dead_mask
 
-        if np.any(escape):
-            esc_idx = np.where(escape)[0]
-            kick_dirs = np.zeros((len(esc_idx), 2))
+        if np.any(escape_mask):
+            esc_pos = self.positions[escape_mask]                  # (E, 2)
+            E       = esc_pos.shape[0]
+            kick_dirs = np.zeros((E, 2))
 
-            obs_c_arr = (np.array([[ob[0], ob[1]] for ob in self.env.obstacles])
-                         if self.env.obstacles else None)
+            # Direction away from nearest obstacle
+            if self.env.obstacles:
+                obs_c_arr = np.array([[ob[0], ob[1]] for ob in self.env.obstacles], dtype=float)
+                diffs_e   = esc_pos[:, np.newaxis, :] - obs_c_arr[np.newaxis, :, :]  # (E, M, 2)
+                dists_e   = np.linalg.norm(diffs_e, axis=2)                           # (E, M)
+                nearest_i = np.argmin(dists_e, axis=1)                                # (E,)
+                nearest_d = dists_e[np.arange(E), nearest_i]                          # (E,)
+                valid_obs = nearest_d > 1e-6
+                kick_dirs[valid_obs] = (
+                    diffs_e[valid_obs, nearest_i[valid_obs], :]
+                    / nearest_d[valid_obs, np.newaxis]
+                )
 
-            for k, di in enumerate(esc_idx):
-                pos      = self.positions[di]
-                best_dir = np.zeros(2)
-                best_str = 0.0
+            # Override with wall direction if wall is closer
+            wall_d = np.stack([
+                esc_pos[:, 0], W - esc_pos[:, 0],
+                esc_pos[:, 1], H - esc_pos[:, 1]
+            ], axis=1)                                             # (E, 4)
+            wall_dirs_all = np.array([[1,0],[-1,0],[0,1],[0,-1]], dtype=float)
+            nearest_wall  = np.argmin(wall_d, axis=1)             # (E,)
+            nearest_wall_d = wall_d[np.arange(E), nearest_wall]   # (E,)
 
-                if obs_c_arr is not None:
-                    diffs_k = pos - obs_c_arr
-                    dists_k = np.linalg.norm(diffs_k, axis=1)
-                    ni      = np.argmin(dists_k)
-                    d       = dists_k[ni]
-                    if d > 1e-6:
-                        best_dir = diffs_k[ni] / d
-                        best_str = 1.0 / max(d, 1.0)
+            obs_str = (1.0 / np.maximum(
+                np.linalg.norm(kick_dirs, axis=1), 1.0
+            ))
+            wall_str = 1.0 / np.maximum(nearest_wall_d, 1.0)
+            use_wall = wall_str > obs_str
+            kick_dirs[use_wall] = wall_dirs_all[nearest_wall[use_wall]]
 
-                wall_dirs  = np.array([[1.,0.],[-1.,0.],[0.,1.],[0.,-1.]])
-                wall_dists = np.array([pos[0], W-pos[0], pos[1], H-pos[1]])
-                nw         = np.argmin(wall_dists)
-                if 1.0/max(wall_dists[nw],1.0) > best_str:
-                    best_dir = wall_dirs[nw]
+            # Zero-direction fallback: perp to current velocity
+            zero_dir = np.linalg.norm(kick_dirs, axis=1) < 1e-6
+            if np.any(zero_dir):
+                v   = self.velocities[escape_mask][zero_dir]
+                sp  = np.linalg.norm(v, axis=1, keepdims=True)
+                perp = np.stack([-v[:, 1], v[:, 0]], axis=1) / np.maximum(sp, 1e-6)
+                kick_dirs[zero_dir] = perp
 
-                if np.linalg.norm(best_dir) < 1e-6:
-                    v  = self.velocities[di]
-                    sp = np.linalg.norm(v)
-                    best_dir = (np.array([-v[1],v[0]])/sp if sp>1e-6
-                                else np.array([1.0,0.0]))
-
-                kick_dirs[k] = best_dir
-
-            # += blends with existing motion, does NOT cause sudden reversal
             kicks = kick_dirs * config.max_speed * 0.5
+            esc_idx = np.where(escape_mask)[0]
             self.velocities[esc_idx] += kicks
+
+            # Re-clamp speed
             spd  = np.linalg.norm(self.velocities[esc_idx], axis=1)
             over = spd > config.max_speed
             if np.any(over):
                 self.velocities[esc_idx[over]] = (
-                    self.velocities[esc_idx[over]] /
-                    spd[over, np.newaxis]) * config.max_speed
+                    self.velocities[esc_idx[over]] / spd[over, np.newaxis]
+                ) * config.max_speed
 
         self._prev_positions = self.positions.copy()
         self._history_timer  = 0
 
-        # Clearance gradient cache (recomputed every 3 frames)
-        self._clear_dirs    = np.zeros((self.num_boids, 2))
-        self._clear_block   = np.zeros(self.num_boids)
-        self._clear_timer   = 0
+        self._clear_dirs  = np.zeros((self.num_boids, 2))
+        self._clear_block = np.zeros(self.num_boids)
+        self._clear_timer = 0
 
     # ──────────────────────────────────────────────────────────────────────────
     # STEERING HELPER
@@ -893,9 +901,82 @@ class SwarmManagerOptimized:
 
         self.logger.end_frame(self)
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────────
+    # M2: TASK ALLOCATION + FORMATION  (B2.2–B2.5)
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    def auction_tasks(self, comm_mask: np.ndarray):
+        """B2.2/B2.3/B2.4 — vectorized decentralized task auction."""
+        if len(self.tasks) == 0:
+            return
+        T = len(self.tasks)
+        unassigned = self.assigned_tasks == -1
+        if np.any(unassigned):
+            uidx  = np.where(unassigned)[0]
+            diff  = self.positions[uidx, np.newaxis, :] - self.tasks[np.newaxis, :, :]
+            dists = np.linalg.norm(diff, axis=2)
+            best  = np.argmin(dists, axis=1)
+            self.assigned_tasks[uidx] = best
+            self.bids[uidx]           = dists[np.arange(len(uidx)), best]
+        for t in range(T):
+            assigned_to_t = np.where(self.assigned_tasks == t)[0]
+            if len(assigned_to_t) <= 1:
+                continue
+            order  = np.lexsort((self.ids[assigned_to_t], self.bids[assigned_to_t]))
+            winner = assigned_to_t[order[0]]
+            losers = assigned_to_t[order[1:]]
+            evict  = losers[comm_mask[winner, losers]]
+            self.assigned_tasks[evict] = -1
+            self.bids[evict]           = np.inf
+
+    def calculate_task_steer(self) -> np.ndarray:
+        """B2.2 — steer toward assigned task waypoint."""
+        task_steer = np.zeros((self.num_boids, 2))
+        valid = self.assigned_tasks != -1
+        if not np.any(valid):
+            return task_steer
+        vidx       = np.where(valid)[0]
+        target_pos = self.tasks[self.assigned_tasks[vidx]]
+        vec        = target_pos - self.positions[vidx]
+        dists      = np.linalg.norm(vec, axis=1)
+        done       = dists < getattr(config, 'task_radius', 20)
+        if np.any(done):
+            done_g = vidx[done]
+            self.assigned_tasks[done_g] = -1
+            self.bids[done_g]           = np.inf
+            self.tasks_completed       += int(np.sum(done))
+            vec[done] = 0.0
+        task_steer[vidx] = vec
+        return self.steer(task_steer, subtract_velocity=True)
+
+    def calculate_formation_steer(self) -> np.ndarray:
+        """B2.5 — vectorized V-formation via centroid offsets."""
+        alive   = ~self.dead_mask
+        steer   = np.zeros((self.num_boids, 2))
+        if not np.any(alive):
+            return steer
+        centroid = np.mean(self.positions[alive], axis=0)
+        vel_cent = np.mean(self.velocities[alive], axis=0)
+        speed    = np.linalg.norm(vel_cent)
+        if speed < 1e-3:
+            return steer
+        dir_vec  = vel_cent / speed
+        perp_vec = np.array([-dir_vec[1], dir_vec[0]])
+        idx      = np.arange(self.num_boids)
+        row      = idx // 2
+        side     = np.where(idx % 2 == 0, 1.0, -1.0)
+        row      = np.where(idx == 0, 0, row)
+        side     = np.where(idx == 0, 0.0, side)
+        targets  = (
+            centroid[np.newaxis, :]
+            - dir_vec[np.newaxis, :]  * (row[:, np.newaxis] * 30.0)
+            + perp_vec[np.newaxis, :] * (side[:, np.newaxis] * row[:, np.newaxis] * 30.0)
+        )
+        return self.steer(targets - self.positions, subtract_velocity=True)
+
+    # ─────────────────────────────────────────────────────────────────────────────
     # METHOD SELECTOR
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────────
 
     def set_method(self, method):
         if method in ['naive', 'grid', 'quadtree']:

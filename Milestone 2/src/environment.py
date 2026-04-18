@@ -126,8 +126,12 @@ class Environment:
         # ── A2.4 hot-reload tracking ──────────────────────────────────────────
         self._config_mtime: float = 0.0
 
+        # ── Obstacle list cache (rebuilt only when obstacles change) ──────────
+        self._obstacles_cache: list = []
+
         # Initial load
         self._load_config()
+        self._rebuild_obstacle_cache()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Public property: unified obstacle list consumed by swarm + visualizer
@@ -136,10 +140,13 @@ class Environment:
     @property
     def obstacles(self):
         """
-        Returns static + dynamic obstacles as one flat list.
-        Each element unpacks as (x, y, r) — DynamicObstacle supports this.
+        Returns cached static + dynamic obstacles as one flat list.
+        Cache is rebuilt only after step() moves dynamic obstacles or config reloads.
         """
-        return list(self._static_obstacles) + list(self.dynamic_obstacles)
+        return self._obstacles_cache
+
+    def _rebuild_obstacle_cache(self):
+        self._obstacles_cache = list(self._static_obstacles) + list(self.dynamic_obstacles)
 
     # ──────────────────────────────────────────────────────────────────────────
     # A2.4 — Config hot-reload
@@ -151,9 +158,18 @@ class Environment:
 
         Call this once per simulation tick from main.py.
         Returns True if a reload happened (useful for logging).
+        Only runs the mtime check every 60 calls to avoid syscall overhead.
         """
         if not os.path.exists(self.config_path):
             return False
+
+        # Throttle mtime syscall to once per 60 ticks (~1 second at 60 FPS)
+        if not hasattr(self, '_reload_tick'):
+            self._reload_tick = 0
+        self._reload_tick += 1
+        if self._reload_tick < 60:
+            return False
+        self._reload_tick = 0
 
         mtime = os.path.getmtime(self.config_path)
         if mtime <= self._config_mtime:
@@ -232,6 +248,7 @@ class Environment:
             new_dyn.append(DynamicObstacle(x, y, r, vx, vy))
 
         self.dynamic_obstacles = new_dyn
+        self._rebuild_obstacle_cache()
         print(
             f"[ENV] Loaded: {len(self._static_obstacles)} static, "
             f"{len(self.dynamic_obstacles)} dynamic obstacles."
@@ -251,6 +268,8 @@ class Environment:
             dt = self.dt
         for dob in self.dynamic_obstacles:
             dob.update(dt, self.width, self.height)
+        # Invalidate cache after dynamic obstacles move
+        self._rebuild_obstacle_cache()
 
     # ──────────────────────────────────────────────────────────────────────────
     # A1.4 — Boundary repulsion (unchanged from M1)
