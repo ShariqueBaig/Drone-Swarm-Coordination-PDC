@@ -78,6 +78,14 @@ Benchmarked using `headless_bench_3d.py` (100 drones, 570 frames):
 | **Grid Hash** | 120.4 | 128.6 | -6.8% |
 | **Naive O(N²)** | 233.4 | 227.9 | +2.4% |
 
+### 5.1 Why Naive O(N²) Wins at N=100
+Although the Naive algorithm has the worst theoretical time complexity, it yields the highest FPS for 100 drones due to real-world hardware characteristics:
+1. **NumPy Vectorization:** The O(N²) distance matrix is computed using NumPy broadcasting, which executes entirely in highly-optimized, pre-compiled C libraries (BLAS/LAPACK) without any Python-level loops.
+2. **Zero Structural Overhead:** Algorithms like Grid Hash and Octree require rebuilding structural representations (grid buckets or cKDTree nodes) every frame. For small values of N, this constant structural overhead is far slower than performing 10,000 raw floating-point calculations.
+3. **Cache Locality:** Calculating a dense 100×100 matrix in contiguous memory benefits enormously from CPU hardware pre-fetching, whereas tree and grid lookups involve pointer-chasing and cache misses.
+
+*(Note: If N scaled to 1,000 or 5,000, the Grid and Octree algorithms would easily overtake the Naive method as the $N^2$ math operations would balloon to 25 million+)*
+
 ---
 
 ## 6. 3D Rendered Performance
