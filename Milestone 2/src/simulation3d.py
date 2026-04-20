@@ -72,7 +72,7 @@ Entity(model='sphere', scale=15000, color=rgb(4, 6, 13),
        double_sided=True, unlit=True)
 random.seed(77)
 _sv = [Vec3(random.uniform(-6000,6000), random.uniform(80,4500),
-            random.uniform(-6000,6000)) for _ in range(220)]
+            random.uniform(-6000,6000)) for _ in range(100)] # Reduced to 100 for FPS
 Entity(model=Mesh(vertices=_sv, mode='point', thickness=3),
        color=rgb(195, 215, 255), unlit=True)
 
@@ -80,7 +80,7 @@ Entity(model=Mesh(vertices=_sv, mode='point', thickness=3),
 Entity(model='plane', scale=(W, 1, W), position=(W/2, 0, W/2),
        color=rgb(9, 14, 23), unlit=True)
 
-GRID_DIVS = 14
+GRID_DIVS = 8  # Reduced from 14 for FPS (16 entities instead of 30)
 _gs = W / GRID_DIVS
 for _gi in range(GRID_DIVS + 1):
     _v = _gi * _gs
@@ -190,22 +190,15 @@ def _stamp_tile(cx, cz):
         hmap_ent.model.generate()
 
 # ── DRONES ────────────────────────────────────────────────────────────────────
+# ── DRONES (optimized: no child entities — saves 200 scene graph nodes) ───────
 boid_entities = []
 for i in range(swarm.num_boids):
     drone = Entity(model='sphere', scale=7, color=rgb(0, 210, 255), unlit=True)
-    Entity(parent=drone, model=Cone(6),
-           scale=(0.45, 0.45, 1.7), position=(0,0,0.65),
-           color=rgb(160, 235, 255), unlit=True)
+    # Cone and behavior_ring children REMOVED for FPS (200 entities saved)
     drone.trail_verts = []
     drone.trail = Entity(model=Mesh(vertices=[], mode='line', thickness=2),
                          color=rgb(0, 145, 220, 185), unlit=True)
     drone._prev_color_key = ''   # dirty-flag: skip redundant GPU color sets
-    
-    # Behavior Glow Ring (Micro-Indicator)
-    e_ring = Entity(parent=drone, model='circle', scale=2.0, rotation_x=90, y=-0.5,
-                    color=color.clear, unlit=True)
-    drone.behavior_ring = e_ring
-    
     boid_entities.append(drone)
     
 # ── M3 TASK MARKERS & ALLOCATOR PRISMS (C2.3) ────────────────────────────────
@@ -304,23 +297,7 @@ bar_aln = _make_bar(-0.46, 'Alignment', rgb(200, 200, 100))
 bar_coh = _make_bar(-0.51, 'Cohesion', rgb(100, 200, 100))
 bar_tsk = _make_bar(-0.56, 'Waypoint', rgb(100, 150, 200))
 
-_RAD = 0.27
-RADAR_POS = (0.78, 0.35)
-Entity(parent=camera.ui, model='quad', scale=(_RAD, _RAD), position=RADAR_POS,
-       color=rgb(8, 12, 22, 80))
-Entity(parent=camera.ui, model='quad', scale=(_RAD+0.007, _RAD+0.007),
-       position=RADAR_POS, color=rgb(0, 170, 255, 20), z=0.01)
-Text(parent=camera.ui, text='RADAR', origin=(0,0),
-     position=(0.78, 0.48), scale=0.75, color=rgb(150, 150, 150))
-
-radar_sweep = Entity(parent=camera.ui,
-                     model=Mesh(vertices=[Vec3(0,0,0), Vec3(0,_RAD*0.48,0)],
-                                mode='line', thickness=2),
-                     color=rgb(0, 255, 110, 170), position=RADAR_POS)
-radar_dots = []
-for _ in range(swarm.num_boids):
-    radar_dots.append(Entity(parent=camera.ui, model='circle',
-                              scale=0.008, color=rgb(0, 215, 255)))
+# RADAR REMOVED — 100 entity position writes/frame eliminated for FPS
 
 # Mode bar (centre top) -- opaque background for visibility
 mode_bar_bg = Entity(parent=camera.ui, model='quad', scale=(0.6, 0.06), position=(0, 0.45), color=rgb(8, 12, 22, 140), enabled=False)
@@ -437,12 +414,13 @@ def update():
     if held_keys['=']:   editor_cam.position += fwd * CAM_ZOOM * time.dt
     if held_keys['-']:   editor_cam.position -= fwd * CAM_ZOOM * time.dt
 
-    # Waypoint pulse
+    # Waypoint pulse (throttled)
     if waypoint_marker.enabled:
         waypoint_marker.rotation_y += 70 * time.dt
-        pulse = 1.0 + 0.38 * math.sin(_t * 5)
-        waypoint_ring.scale_x = 3 * pulse
-        waypoint_ring.scale_y = 3 * pulse
+        if _frame[0] % 4 == 0:
+            pulse = 1.0 + 0.38 * math.sin(_t * 5)
+            waypoint_ring.scale_x = 3 * pulse
+            waypoint_ring.scale_y = 3 * pulse
 
     # Ghost in obstacle mode (ray-plane intersection for floor preview)
     if obs_mode:
@@ -471,8 +449,7 @@ def update():
             
         obs_ghost.rotation_y += 55 * time.dt
 
-    # Radar sweep
-    radar_sweep.rotation_z -= 85 * time.dt
+    # Radar removed for FPS
 
     # Update moving user-placed obstacles into env.obstacles (persistent list)
     for mo in user_moving_obs:
@@ -489,30 +466,26 @@ def update():
     for i, ob in enumerate(swarm.env.obstacles):
         if i < len(static_obs_ents):
             static_obs_ents[i].position = (ob[0], ob[1], ob[2])
-            static_obs_ents[i].rotation_y += 28 * time.dt
     # Sync dynamic obstacles separately (avoids index-mapping confusion)
     for i, d in enumerate(swarm.env.dynamic_obstacles):
         if i < len(dyn_obs_ents):
             dyn_obs_ents[i].position = (d.x, d.y, d.z)
-            dyn_obs_ents[i].rotation_y += 28 * time.dt
 
     # Per-drone update
     active_count = 0
     centroid = Vec3(0, 0, 0)
-    do_hmap  = show_heatmap and (_frame[0] % 4 == 0)
-    do_trail = show_trails  and (_frame[0] % 4 == 0)
-    do_nl    = show_neighbor_lines and (_frame[0] % 5 == 0)
+    do_hmap  = show_heatmap and (_frame[0] % 6 == 0)
+    do_trail = show_trails  and (_frame[0] % 8 == 0)
+    do_nl    = show_neighbor_lines and (_frame[0] % 10 == 0)
+    do_look  = (_frame[0] % 2 == 0)  # throttle look_at (every 2nd frame for smooth rotation)
 
     for i, e in enumerate(boid_entities):
         pos = swarm.positions[i]
 
         if swarm.dead_mask[i]:
-            if e.color != color.red:
+            if e._prev_color_key != 'dead':
                 e.color = rgb(255, 30, 30)
-                for ch in e.children:
-                    if hasattr(ch, 'model') and ch.model:
-                        ch.color = rgb(255, 100, 90)
-                radar_dots[i].color = rgb(255, 30, 30)
+                e._prev_color_key = 'dead'
             e.y = max(-15, e.y - 140*time.dt)
             e.rotation_x += 75*time.dt
             continue
@@ -528,25 +501,12 @@ def update():
         # FLEET HIGHLIGHTING & FORCE DEBUG (TASK C2.4 / C2.3)
         h_id = highlighted_mission[0]
         
+        # Fleet highlighting (dirty-flag: skip if unchanged)
         if show_vectors:
-            # Behavior Glow (Micro-Indicator)
-            forces = [
-                (np.linalg.norm(swarm.last_sep[i]), rgb(255, 60, 60)),
-                (np.linalg.norm(swarm.last_aln[i]), rgb(255, 255, 60)),
-                (np.linalg.norm(swarm.last_coh[i]), rgb(60, 255, 60)),
-                (np.linalg.norm(swarm.last_waypoint[i]), rgb(60, 210, 255))
-            ]
-            mag_max, col_max = max(forces, key=lambda x: x[0])
-            if mag_max > 0.08:
-                e.behavior_ring.color = color.rgba(col_max.r, col_max.g, col_max.b, min(0.4, mag_max*0.5))
-            else:
-                e.behavior_ring.color = color.clear
-            # dirty-flag: only write color/scale if changed
             if e._prev_color_key != 'vec':
                 e.color = rgb(0, 210, 255); e.scale = 7
                 e._prev_color_key = 'vec'
         else:
-            e.behavior_ring.color = color.clear
             if h_id != -1:
                 if swarm.mission_type[i] == h_id:
                     _ck = 'sel'
@@ -563,9 +523,8 @@ def update():
                     e.color = rgb(0, 210, 255); e.scale = 7; e.unlit = False
                     e._prev_color_key = 'norm'
 
-        if spd > 0.5:
+        if spd > 0.5 and do_look:
             e.look_at(p3 + Vec3(vel[0], vel[1], vel[2]))
-        # NOTE: children[0] color is set at creation and never changes — removed from hot loop
 
         # Trail
         if do_trail:
@@ -574,11 +533,6 @@ def update():
             if len(e.trail_verts) >= 2:
                 e.trail.model.vertices = e.trail_verts
                 e.trail.model.generate()
-
-        # Radar dot
-        rx = max(-0.13, min(0.13, (pos[0]/W - 0.5) * _RAD))
-        rz = max(-0.13, min(0.13, (pos[2]/W - 0.5) * _RAD))
-        radar_dots[i].position = Vec3(0.78 + rx, 0.35 - rz, -0.01)
 
     # Neighbour lines
     if do_nl:
@@ -608,68 +562,71 @@ def update():
                                    Vec3(cx_c, cy_c, cz_c), 4 * time.dt)
         editor_cam.look_at(centroid)
 
-    # M2 Task Visualization (C2.3)
-    assigned_count = np.zeros(len(swarm.tasks))
-    for tid in swarm.assigned_tasks:
-        if tid != -1: assigned_count[tid] += 1
-    
-    # Update Action For Task Markers
-    for tid, tm_dict in enumerate(task_markers):
-        if assigned_count[tid] > 0:
-            tm_dict['icon'].color = rgb(0, 255, 255, 200)
-            tm_dict['icon'].rotation_y += 100 * time.dt
-            tm_dict['icon'].scale = Vec3(30, 50, 30) * (1.1 + 0.1 * math.sin(_t*5))
-            tm_dict['ring'].color = rgb(255, 200, 0, 150)
+    # M2 Task Visualization (C2.3) — throttled to every 6th frame
+    if _frame[0] % 6 == 0:
+        assigned_count = np.zeros(len(swarm.tasks))
+        for tid in swarm.assigned_tasks:
+            if tid != -1: assigned_count[tid] += 1
+        
+        # Update Action For Task Markers
+        for tid, tm_dict in enumerate(task_markers):
+            if assigned_count[tid] > 0:
+                tm_dict['icon'].color = rgb(0, 255, 255, 200)
+                tm_dict['icon'].rotation_y += 100 * time.dt * 6  # compensate for throttle
+                tm_dict['icon'].scale = Vec3(30, 50, 30) * (1.1 + 0.1 * math.sin(_t*5))
+                tm_dict['ring'].color = rgb(255, 200, 0, 150)
+            else:
+                tm_dict['icon'].color = rgb(150, 150, 150, 150) # Grey = Unassigned
+                tm_dict['ring'].color = rgb(150, 150, 150, 60)
+                tm_dict['icon'].rotation_y += 20 * time.dt * 6
+
+    # Update Action For HUD Force Bar & Macro Swarm Intent (C2.4) — throttled
+    if _frame[0] % 6 == 0:
+        if show_vectors and active_count > 0:
+            if not hasattr(swarm, 'last_sep'): return # safety check
+            
+            alive_mask = ~swarm.dead_mask
+            l_sep = swarm.last_sep[alive_mask]
+            l_aln = swarm.last_aln[alive_mask]
+            l_coh = swarm.last_coh[alive_mask]
+            l_tsk = swarm.last_waypoint[alive_mask]
+
+            avg_sep = np.mean(np.linalg.norm(l_sep, axis=1))
+            avg_aln = np.mean(np.linalg.norm(l_aln, axis=1))
+            avg_coh = np.mean(np.linalg.norm(l_coh, axis=1))
+            avg_tsk = np.mean(np.linalg.norm(l_tsk, axis=1))
+            
+            # Drive the labeled bars
+            scale_fac = 0.5 
+            bar_sep.scale_x = min((avg_sep / scale_fac) * 0.12, 0.12)
+            bar_aln.scale_x = min((avg_aln / scale_fac) * 0.12, 0.12)
+            bar_coh.scale_x = min((avg_coh / scale_fac) * 0.12, 0.12)
+            bar_tsk.scale_x = min((avg_tsk / scale_fac) * 0.12, 0.12)
+
+            # Macro Intent Indicator: Average of all steering forces
+            net_force_v = (np.mean(l_sep, axis=0) + np.mean(l_aln, axis=0) + 
+                           np.mean(l_coh, axis=0) + np.mean(l_tsk, axis=0))
+            
+            intent_indicator.enabled = True
+            intent_indicator.position = centroid
+            intent_indicator.scale = Vec3(35, 60, 35) * (1.0 + 0.2 * math.sin(_t*6))
+            
+            if np.linalg.norm(net_force_v) > 0.01:
+                intent_indicator.look_at(centroid + Vec3(net_force_v[0], net_force_v[1], net_force_v[2]))
+                intent_indicator.rotation_x = 90 # Orient diamond correctly after look_at
         else:
-            tm_dict['icon'].color = rgb(150, 150, 150, 150) # Grey = Unassigned
-            tm_dict['ring'].color = rgb(150, 150, 150, 60)
-            tm_dict['icon'].rotation_y += 20 * time.dt
+            intent_indicator.enabled = False
 
-    # Update Action For HUD Force Bar & Macro Swarm Intent (C2.4)
-    if show_vectors and active_count > 0:
-        if not hasattr(swarm, 'last_sep'): return # safety check
-        
-        alive_mask = ~swarm.dead_mask
-        l_sep = swarm.last_sep[alive_mask]
-        l_aln = swarm.last_aln[alive_mask]
-        l_coh = swarm.last_coh[alive_mask]
-        l_tsk = swarm.last_waypoint[alive_mask]
+    # Update Mission Button highlight state — throttled to every 10th frame
+    if _frame[0] % 10 == 0:
+        # Button indices: 0-3: Missions 0-3, 4: Coverage (mission 6), 5: Intercept (mission 4)
+        btn_mission_map = [0, 1, 2, 3, 6, 4]  # Maps button index to mission type
+        for i, btn in enumerate(mission_btns):
+            mission_type = btn_mission_map[i] if i < len(btn_mission_map) else i
+            btn.color = rgb(100, 150, 180, 100) if highlighted_mission[0] == mission_type else (rgb(60, 80, 60, 50) if i == 4 else rgb(60, 60, 60, 50))
 
-        avg_sep = np.mean(np.linalg.norm(l_sep, axis=1))
-        avg_aln = np.mean(np.linalg.norm(l_aln, axis=1))
-        avg_coh = np.mean(np.linalg.norm(l_coh, axis=1))
-        avg_tsk = np.mean(np.linalg.norm(l_tsk, axis=1))
-        
-        # Drive the labeled bars
-        scale_fac = 0.5 
-        bar_sep.scale_x = min((avg_sep / scale_fac) * 0.12, 0.12)
-        bar_aln.scale_x = min((avg_aln / scale_fac) * 0.12, 0.12)
-        bar_coh.scale_x = min((avg_coh / scale_fac) * 0.12, 0.12)
-        bar_tsk.scale_x = min((avg_tsk / scale_fac) * 0.12, 0.12)
-
-        # Macro Intent Indicator: Average of all steering forces
-        net_force_v = (np.mean(l_sep, axis=0) + np.mean(l_aln, axis=0) + 
-                       np.mean(l_coh, axis=0) + np.mean(l_tsk, axis=0))
-        
-        intent_indicator.enabled = True
-        intent_indicator.position = centroid
-        intent_indicator.scale = Vec3(35, 60, 35) * (1.0 + 0.2 * math.sin(_t*6))
-        
-        if np.linalg.norm(net_force_v) > 0.01:
-            intent_indicator.look_at(centroid + Vec3(net_force_v[0], net_force_v[1], net_force_v[2]))
-            intent_indicator.rotation_x = 90 # Orient diamond correctly after look_at
-    else:
-        intent_indicator.enabled = False
-
-    # Update Mission Button highlight state
-    # Button indices: 0-3: Missions 0-3, 4: Coverage (mission 6), 5: Intercept (mission 4)
-    btn_mission_map = [0, 1, 2, 3, 6, 4]  # Maps button index to mission type
-    for i, btn in enumerate(mission_btns):
-        mission_type = btn_mission_map[i] if i < len(btn_mission_map) else i
-        btn.color = rgb(100, 150, 180, 100) if highlighted_mission[0] == mission_type else (rgb(60, 80, 60, 50) if i == 4 else rgb(60, 60, 60, 50))
-
-    # M3: Update Area Coverage Tracking & Telemetry
-    if _frame[0] % 2 == 0:
+    # M3: Update Area Coverage Tracking & Telemetry — throttled to every 6th frame
+    if _frame[0] % 6 == 0:
         global log_timer
         current_vis = np.sum(swarm.visited_grid)
         cov_pct = (current_vis / (swarm.grid_res**3)) * 100
@@ -685,17 +642,13 @@ def update():
                     if show_heatmap:
                         hmap_verts.append(Vec3(*pos))
                         hmap_colors.append(rgb(0, 210, 255, 40))
-                    if len(hmap_verts) % 5 == 0:
+                    if len(hmap_verts) % 25 == 0:
                         DiscoveryPulse(pos)
                 if show_heatmap:
                     hmap_ent.model.vertices = hmap_verts
                     hmap_ent.model.colors = hmap_colors
                     hmap_ent.model.generate()
-                scan_plane.enabled = True
-                scan_plane.y = (H/2) + math.sin(_t*0.5) * (H/2)
-                scan_plane.color = rgb(0, 210, 255, 10 + 10*math.sin(_t*8))
-        else:
-            scan_plane.enabled = False
+                # Scan plane removed for FPS optimization
 
         # Telemetry Snapshot (every ~1 second)
         if _t > log_timer:
@@ -719,83 +672,83 @@ def update():
     if active_count > 0:
         centroid_marker.enabled = show_centroid
         centroid_marker.position = centroid
+        centroid_marker.rotation_y += 45 * time.dt
         
-        # Update Ghost Drone movement (Orbital path)
+        # Ghost Drone movement — every frame for smooth visuals (just 3 trig calls)
         _gt = _t * 0.5
         gx = W/2 + math.sin(_gt) * W*0.3
         gz = D/2 + math.cos(_gt*1.3) * D*0.3
         gy = H/2 + math.sin(_gt*0.7) * H*0.2
         ghost_drone.position = (gx, gy, gz)
         
-        # Intercept Pulse logic
-        intercepting = np.where(~swarm.dead_mask & (swarm.mission_type == 4))[0]
-        if len(intercepting) > 0:
-            d_to_g = np.linalg.norm(swarm.positions[intercepting] - np.array(ghost_drone.position), axis=1)
-            if np.any(d_to_g < 60): # Slightly larger trigger for visual emp
-                emp_pulse.position = ghost_drone.position
-                emp_pulse.scale_x += 300 * time.dt
-                emp_pulse.scale_y = emp_pulse.scale_x
-                emp_pulse.scale_z = emp_pulse.scale_x
-                if emp_pulse.scale_x > 180: emp_pulse.scale = (1,1,1)
-                emp_pulse.color = rgb(255, 0, 80, max(0, 160 - (emp_pulse.scale_x/180)*160))
-            else:
-                emp_pulse.color = rgb(255, 0, 80, 0); emp_pulse.scale = 1
-        else:
-            emp_pulse.color = rgb(255, 0, 80, 0); emp_pulse.scale = 1
-
         # Update swarm knowledge of ghost
         if len(swarm.tasks) > 8:
             swarm.tasks[8] = (gx, gy, gz)
         
-        centroid_marker.rotation_y += 45 * time.dt
+        # Intercept Pulse logic — throttled (numpy ops)
+        if _frame[0] % 4 == 0:
+            intercepting = np.where(~swarm.dead_mask & (swarm.mission_type == 4))[0]
+            if len(intercepting) > 0:
+                d_to_g = np.linalg.norm(swarm.positions[intercepting] - np.array(ghost_drone.position), axis=1)
+                if np.any(d_to_g < 60):
+                    emp_pulse.position = ghost_drone.position
+                    emp_pulse.scale_x += 300 * time.dt * 4
+                    emp_pulse.scale_y = emp_pulse.scale_x
+                    emp_pulse.scale_z = emp_pulse.scale_x
+                    if emp_pulse.scale_x > 180: emp_pulse.scale = (1,1,1)
+                    emp_pulse.color = rgb(255, 0, 80, max(0, 160 - (emp_pulse.scale_x/180)*160))
+                else:
+                    emp_pulse.color = rgb(255, 0, 80, 0); emp_pulse.scale = 1
+            else:
+                emp_pulse.color = rgb(255, 0, 80, 0); emp_pulse.scale = 1
     else:
         centroid_marker.enabled = False
 
-    # HUD update
-    cov = swarm.coverage_pct
-    dead_n = int(np.sum(swarm.dead_mask))
-    fps_v  = int(round(1.0 / max(time.dt, 0.001)))
-    fault  = '[FAULT] ' if swarm.fault_injected else ''
-    algo   = swarm.use_method.upper()
-    cam_s  = 'CINEMATIC' if cinematic_mode else 'Free'
-    trail_s = 'ON' if show_trails else 'OFF'
-    nl_s   = 'ON' if show_neighbor_lines else 'OFF'
-    hm_s   = 'ON' if show_heatmap else 'OFF'
-    wp_s   = 'WAYPOINT' if waypoint_marker.enabled else 'Auctioning'
-    vec_s = 'ON' if show_vectors else 'OFF'
+    # HUD update — throttled to every 10th frame (text formatting is expensive)
+    if _frame[0] % 10 == 0:
+        cov = swarm.coverage_pct
+        dead_n = int(np.sum(swarm.dead_mask))
+        fps_v  = int(round(1.0 / max(time.dt, 0.001)))
+        fault  = '[FAULT] ' if swarm.fault_injected else ''
+        algo   = swarm.use_method.upper()
+        cam_s  = 'CINEMATIC' if cinematic_mode else 'Free'
+        trail_s = 'ON' if show_trails else 'OFF'
+        nl_s   = 'ON' if show_neighbor_lines else 'OFF'
+        hm_s   = 'ON' if show_heatmap else 'OFF'
+        wp_s   = 'WAYPOINT' if waypoint_marker.enabled else 'Auctioning'
+        vec_s = 'ON' if show_vectors else 'OFF'
 
-    vec_s = 'ON' if show_vectors else 'OFF'
-    info_text.text = (
-        'SWARM  COVERAGE  METRICS\n'
-        '------------------------\n'
-        f'Active : {fault}{active_count}/{swarm.num_boids}\n'
-        f'Dead   : {dead_n}\n'
-        f'Cover  : {cov:.1f}%\n'
-        f'Status : {wp_s}\n'
-        f'Algo   : {algo}\n'
-        f'\n'
-        f'TOGGLES (Keys)\n'
-        f'------------------------\n'
-        f'T: Trails {trail_s}\n'
-        f'L: Neighbor Lines {nl_s}\n'
-        f'H: Coverage Map {hm_s}\n'
-        f'G: Center {("ON" if show_centroid else "OFF")}\n'
-        f'V: Diagnostics {vec_s}\n'
-        f'C: Cinematic {cam_s}\n'
-        f'1/2/3: Algorithm\n'
-        f'O: Obstacle Mode\n'
-        f'R: Reset\n'
-        f'FPS    : {fps_v}'
-    )
+        info_text.text = (
+            'SWARM  COVERAGE  METRICS\n'
+            '------------------------\n'
+            f'Active : {fault}{active_count}/{swarm.num_boids}\n'
+            f'Dead   : {dead_n}\n'
+            f'Cover  : {cov:.1f}%\n'
+            f'Status : {wp_s}\n'
+            f'Algo   : {algo}\n'
+            f'\n'
+            f'TOGGLES (Keys)\n'
+            f'------------------------\n'
+            f'T: Trails {trail_s}\n'
+            f'L: Neighbor Lines {nl_s}\n'
+            f'H: Coverage Map {hm_s}\n'
+            f'G: Center {("ON" if show_centroid else "OFF")}\n'
+            f'V: Diagnostics {vec_s}\n'
+            f'C: Cinematic {cam_s}\n'
+            f'1/2/3: Algorithm\n'
+            f'O: Obstacle Mode\n'
+            f'R: Reset\n'
+            f'FPS    : {fps_v}'
+        )
 
-    if obs_mode:
-        mode_bar_bg.enabled = True
-        mov_tag = ' [MOVING]' if obs_moving_mode else ''
-        mode_bar.text = (f'[ OBS MODE{mov_tag} ]  Height:{int(obs_height[0])}'
-                         f'  |  M=Moving  ↑↓=Height  LClick=Place  RClick=Undo')
-    else:
-        mode_bar_bg.enabled = False
-        mode_bar.text = ''
+        if obs_mode:
+            mode_bar_bg.enabled = True
+            mov_tag = ' [MOVING]' if obs_moving_mode else ''
+            mode_bar.text = (f'[ OBS MODE{mov_tag} ]  Height:{int(obs_height[0])}'
+                             f'  |  M=Moving  ↑↓=Height  LClick=Place  RClick=Undo')
+        else:
+            mode_bar_bg.enabled = False
+            mode_bar.text = ''
 
     # Reset
     if held_keys['r']:
@@ -816,7 +769,7 @@ def update():
             e._prev_color_key = ''   # reset dirty-flag so colors re-evaluate
             e.trail_verts.clear()
             e.trail.model.vertices = []; e.trail.model.generate()
-        for d in radar_dots: d.color = rgb(0, 215, 255)
+        # Radar removed for FPS
         while user_added:
             rec = user_added.pop()
             destroy(rec['ent'])

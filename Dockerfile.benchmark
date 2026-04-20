@@ -1,0 +1,19 @@
+# Headless benchmark container — no GPU/display required
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir numpy scipy psutil
+
+WORKDIR /app
+COPY . .
+
+RUN mkdir -p /app/benchmarks
+
+CMD ["python3", "headless_bench_3d.py"]

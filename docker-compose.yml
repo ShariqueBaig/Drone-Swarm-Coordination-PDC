@@ -17,15 +17,13 @@ services:
     
     # Display and X11 socket for GUI rendering
     environment:
-      - DISPLAY=${DISPLAY}
+      - DISPLAY=host.docker.internal:0
       - QT_X11_NO_MITSHM=1
       - RAY_memory=1000000000
       - RAY_object_store_memory=500000000
     
-    # Mount X11 socket for display
+    # Mount volumes for display and data
     volumes:
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - ${HOME}/.Xauthority:/root/.Xauthority:ro
       - ./logs:/app/logs
       - ./benchmarks:/app/benchmarks
       - ./results:/app/results
