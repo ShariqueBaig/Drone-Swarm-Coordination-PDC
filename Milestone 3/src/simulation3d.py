@@ -243,14 +243,16 @@ info_text = Text(text='Initializing...', position=(-0.89, 0.45),
 if not hasattr(config, 'waypoint_weight'):
     config.waypoint_weight = 2.5
 
-slider_x = -0.72
+slider_x = -0.84
 slider_start_y = 0.08
 def _make_slider(text, val, y_off):
-    s = ThinSlider(text=text, dynamic=True, min=0, max=10, default=val,
-                   x=slider_x, y=y_off, parent=camera.ui, scale=0.8)
-    s.label.color = color.white
-    s.label.scale = 1.1
-    s.label.position = (-0.1, 0.01)
+    # Place heading above the bar and keep both inside the left UI panel
+    heading_x = slider_x + 0.02
+    Text(parent=camera.ui, text=text, position=(heading_x, y_off + 0.035),
+        scale=0.65, color=color.white, origin=(-0.5,0))
+    # Reduce slider width so it fits inside the panel and move slightly down
+    s = ThinSlider(text='', dynamic=True, min=0, max=10, default=val,
+                x=slider_x, y=y_off - 0.02, parent=camera.ui, scale=0.32)
     return s
 
 separation_slider = _make_slider('Separation', config.separation_weight, slider_start_y)
@@ -791,18 +793,7 @@ def update():
             f'Sim TPS: {int(_physics_tps[0])}\n'
             f'FPS    : {fps_v}\n'
             f'\n'
-            f'TOGGLES (Keys)\n'
-            f'------------------------\n'
-            f'T: Trails {trail_s}\n'
-            f'L: Neighbor Lines {nl_s}\n'
-            f'H: Coverage Map {hm_s}\n'
-            f'G: Center {"ON" if show_centroid else "OFF"}\n'
-            f'V: Diagnostics {vec_s}\n'
-            f'B: Benchmark {"ON" if show_benchmark else "OFF"}\n'
-            f'C: Cinematic {cam_s}\n'
-            f'1/2: Algorithm\n'
-            f'O: Obstacle Mode\n'
-            f'R: Reset'
+            f'Controls: see panel for key bindings.'
         )
 
         if obs_mode:
