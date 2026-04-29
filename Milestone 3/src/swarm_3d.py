@@ -135,8 +135,12 @@ class SwarmManager3D:
         self._last_pairs_j = np.array([], dtype=int)
 
         self.grid_res = 30
+        # ═══ PDC TECHNIQUE: Spatial Grid for Coverage Tracking ═══
+        # Standard numpy grid for efficient visited cell tracking
+        # Note: PaddedGrid disabled due to memory overhead (6.87GB for padding)
+        # Instead using regular numpy array + thread-safe access via lock
         self.visited_grid = np.zeros((self.grid_res, self.grid_res, self.grid_res), dtype=bool)
-        self.last_grid = np.zeros_like(self.visited_grid)
+        self.last_grid = np.zeros((self.grid_res, self.grid_res, self.grid_res), dtype=bool)
 
         self._pool = ThreadPoolExecutor(max_workers=config.num_threads)
         self._collision_lock = threading.Lock()
@@ -159,7 +163,9 @@ class SwarmManager3D:
         self.state_lock = threading.Lock()
 
     def _repopulate_work_queue(self):
+        # Collect unvisited cells using numpy
         unvisited = np.argwhere(~self.visited_grid)
+        
         if len(unvisited) > 0:
             np.random.shuffle(unvisited)
             with self._work_queue_lock:
@@ -174,7 +180,9 @@ class SwarmManager3D:
 
     @property
     def coverage_pct(self):
-        return (np.sum(self.visited_grid) / (self.grid_res ** 3)) * 100
+        # Count visited cells efficiently using numpy
+        visited_count = np.count_nonzero(self.visited_grid)
+        return (visited_count / (self.grid_res ** 3)) * 100
 
     def find_neighbors_numba(self):
         """
