@@ -729,15 +729,17 @@ def update():
                     hmap_ent.model.colors = hmap_colors
                     hmap_ent.model.generate()  # Only regenerate when new tiles added
 
-        # Telemetry Snapshot
         if _t > log_timer:
             log_timer = _t + 1.0
+            rob = swarm.get_robustness_score(_t - app.start_time)
+            swarm.metrics.record_robustness(rob)
             metrics_log.append({
                 'Time': round(_t - app.start_time, 1),
                 'Coverage': round(cov_pct, 2),
                 'Active': active_count,
                 'Dead': int(np.sum(swarm.dead_mask)),
-                'Collisions': swarm.collision_count
+                'Collisions': swarm.collision_count,
+                'Robustness': swarm.get_robustness_score(_t - app.start_time)
             })
 
         # Mission Complete Detection
@@ -790,6 +792,7 @@ def update():
             f'Backend: {gpu_s} | {threads_s}T\n'
             f'Sim TPS: {int(_physics_tps[0])}\n'
             f'FPS    : {fps_v}\n'
+            f'Robustness: {swarm.get_robustness_score(_t - app.start_time):.2f}\n'
             f'\n'
             f'TOGGLES (Keys)\n'
             f'------------------------\n'

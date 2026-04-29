@@ -43,6 +43,7 @@ class ParallelMetrics:
         self._frame_serial_time = 0.0
         self._frame_parallel_time = 0.0
         self._frame_start = None
+        self.robustness_history = []
         self._serial_sections = {"serial_overhead", "auction"}
         self._parallel_sections = set(FLYNN_TAXONOMY.keys()) - self._serial_sections
         self._serial_fractions = []
@@ -80,6 +81,10 @@ class ParallelMetrics:
                 s = self._frame_serial_time / frame_measured
                 self._serial_fractions.append(s)
             self._frame_total_times.append(total)
+
+    def record_robustness(self, score):
+        if self.frame_count >= self.warmup_frames:
+            self.robustness_history.append(score)
 
     def get_serial_fraction(self):
         if not self._serial_fractions: return 0.5
@@ -171,4 +176,11 @@ class ParallelMetrics:
             for n, a_s, g_s in self.get_speedup_table():
                 w.writerow([f"amdahl_{n}_cores", f"{a_s:.4f}"])
                 w.writerow([f"gustafson_{n}_cores", f"{g_s:.4f}"])
+            
+            # Robustness evaluation
+            w.writerow([])
+            w.writerow(["performance_evaluation", "value"])
+            if hasattr(self, 'robustness_history') and self.robustness_history:
+                avg_rob = sum(self.robustness_history) / len(self.robustness_history)
+                w.writerow(["avg_robustness_index", f"{avg_rob:.4f}"])
         print(f"[ParallelMetrics] Exported to {filename}")

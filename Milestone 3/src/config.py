@@ -111,8 +111,8 @@ enable_async_gpu_pipeline = False  # TODO: Integrate in M4 (requires double-buff
 enable_gpu_staging_buffers = False # TODO: Use staging buffers for async transfers
 
 print(f"[CONFIG] M3 Optimizations Enabled:")
-print(f"  ├─ Ring Buffers (trails): max_len={trail_max_length}")
-print(f"  ├─ PaddedGrid (false sharing): enabled={enable_padded_grid}")
-print(f"  ├─ Render Profiling: enabled={enable_render_profiling}")
-print(f"  └─ GPU Async Pipeline: enabled={enable_async_gpu_pipeline}")
+print(f"  +- Ring Buffers (trails): max_len={trail_max_length}")
+print(f"  +- PaddedGrid (false sharing): enabled={enable_padded_grid}")
+print(f"  +- Render Profiling: enabled={enable_render_profiling}")
+print(f"  +- GPU Async Pipeline: enabled={enable_async_gpu_pipeline}")
 
