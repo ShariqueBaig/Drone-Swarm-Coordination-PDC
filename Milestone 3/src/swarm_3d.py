@@ -117,18 +117,25 @@ class SwarmManager3D:
             self.tasks[4 + i] = env.obstacles[i][:3]
         self.tasks[6] = [env.width * 0.1, env.height * 0.2, env.depth * 0.1]
         self.tasks[7] = [env.width * 0.9, env.height * 0.8, env.depth * 0.9]
+        self.tasks[8] = [env.width * 0.3, 150, env.depth * 0.3] # Pickup Point
+        self.tasks[9] = [env.width * 0.7, 150, env.depth * 0.7] # Dropoff Point
 
         self.assigned_tasks = np.full(self.num_boids, -1, dtype=int)
         self.bids = np.full(self.num_boids, np.inf)
         self.collision_count = 0
 
-        self.mission_type = np.random.randint(0, 4, self.num_boids)
-        self.mission_type[:max(1, int(self.num_boids * 0.4))] = 6
+        self.mission_type = np.full(self.num_boids, 3, dtype=int) # Default to Idle (3)
         self.mission_timer = np.random.rand(self.num_boids) * 30.0
+        self.transport_phase = np.zeros(self.num_boids, dtype=int) # 0: Pickup, 1: Dropoff
         
         self.failed_mask = np.zeros(self.num_boids, dtype=bool)
         self.fault_injected = False
         self.frame_count = 0
+        
+        # ═══ PER-DRONE TARGETS (M3 Optimization) ═══
+        # Prevents multiple drones from fighting over the same task index
+        self.drone_targets = self.positions.copy()
+        self.patrol_phase = np.zeros(self.num_boids, dtype=int)
 
         self.use_method = "numba_jit"
         self._last_pairs_i = np.array([], dtype=int)
@@ -384,6 +391,11 @@ class SwarmManager3D:
             sm = dist < config.safety_distance
             if np.any(sm):
                 v = diff[sm] / np.maximum(dist[sm, np.newaxis], 1e-9)
+                # ═══ PDC TECHNIQUE: Proximity-Based Repulsion ═══
+                # Scale the force so closer neighbors have a much stronger influence.
+                weight = (config.safety_distance - dist[sm]) / config.safety_distance
+                v *= weight[:, np.newaxis]
+                
                 np.add.at(sep_f, ii[sm], v)
                 np.add.at(sep_f, jj[sm], -v)
 
@@ -436,20 +448,45 @@ class SwarmManager3D:
         margin = config.boundary_margin
         wall_acc = np.zeros((self.num_boids, 3))
 
-        near_min_x = self.positions[:, 0] < margin
-        wall_acc[near_min_x, 0] += config.max_force
-        near_max_x = self.positions[:, 0] > (W - margin)
-        wall_acc[near_max_x, 0] -= config.max_force
+        # ═══ PDC TECHNIQUE: Proportional Steering ═══
+        # Instead of a binary force, we scale it by how deep the drone is in the margin
+        # This provides a smoother, stronger "push-back" near the edge.
+        
+        # Min X
+        m_x0 = self.positions[:, 0] < margin
+        if np.any(m_x0):
+            depth = (margin - self.positions[m_x0, 0]) / margin
+            wall_acc[m_x0, 0] += config.max_force * (1.0 + depth * 2.0)
+        
+        # Max X
+        m_x1 = self.positions[:, 0] > (W - margin)
+        if np.any(m_x1):
+            depth = (self.positions[m_x1, 0] - (W - margin)) / margin
+            wall_acc[m_x1, 0] -= config.max_force * (1.0 + depth * 2.0)
 
-        near_min_y = self.positions[:, 1] < margin
-        wall_acc[near_min_y, 1] += config.max_force
-        near_max_y = self.positions[:, 1] > (H - margin)
-        wall_acc[near_max_y, 1] -= config.max_force
+        # Min Y (Altitude)
+        m_y0 = self.positions[:, 1] < margin
+        if np.any(m_y0):
+            depth = (margin - self.positions[m_y0, 1]) / margin
+            wall_acc[m_y0, 1] += config.max_force * (1.0 + depth * 2.0)
+        
+        # Max Y
+        m_y1 = self.positions[:, 1] > (H - margin)
+        if np.any(m_y1):
+            depth = (self.positions[m_y1, 1] - (H - margin)) / margin
+            wall_acc[m_y1, 1] -= config.max_force * (1.0 + depth * 2.0)
 
-        near_min_z = self.positions[:, 2] < margin
-        wall_acc[near_min_z, 2] += config.max_force
-        near_max_z = self.positions[:, 2] > (D - margin)
-        wall_acc[near_max_z, 2] -= config.max_force
+        # Min Z
+        m_z0 = self.positions[:, 2] < margin
+        if np.any(m_z0):
+            depth = (margin - self.positions[m_z0, 2]) / margin
+            wall_acc[m_z0, 2] += config.max_force * (1.0 + depth * 2.0)
+        
+        # Max Z
+        m_z1 = self.positions[:, 2] > (D - margin)
+        if np.any(m_z1):
+            depth = (self.positions[m_z1, 2] - (D - margin)) / margin
+            wall_acc[m_z1, 2] -= config.max_force * (1.0 + depth * 2.0)
 
         return self.steer(wall_acc)
 
@@ -472,8 +509,11 @@ class SwarmManager3D:
         unassigned = np.where(self.assigned_tasks == -1)[0]
         if len(unassigned) == 0: return
 
-        task_ranges = {0: (0, 4), 1: (4, 6), 2: (6, 8), 4: (8, 9), 5: (9, 10)}
+        task_ranges = {0: (0, 4), 2: (6, 8), 6: (6, 8), 5: (9, 10), 7: (8, 10)}
         for m_type, (t_start, t_end) in task_ranges.items():
+            # Area Coverage drones (6/2) manage their own drone_targets; skip auctioning
+            if m_type in [2, 6]: continue
+            
             m_mask = self.mission_type[unassigned] == m_type
             m_idx = unassigned[m_mask]
             if len(m_idx) == 0: continue
@@ -491,14 +531,25 @@ class SwarmManager3D:
         if len(alive) == 0: return ts
 
         self.mission_timer[alive] -= config.dt
-        done = (self.mission_timer <= 0) & (self.mission_type != 0) & (~self.dead_mask)
+        
+        # Only timeout for exploration/seeking missions. Idle (3), Transport (7), Recall (5) should NOT timeout.
+        can_timeout = (self.mission_type == 0) | (self.mission_type == 2) | (self.mission_type == 6)
+        done = (self.mission_timer <= 0) & can_timeout & (~self.dead_mask)
+        
         if np.any(done):
             self.mission_type[done] = 0
             self.assigned_tasks[done] = -1
+            self.mission_timer[done] = np.random.uniform(15, 35, size=np.sum(done))
 
         mt = self.mission_type[alive]
         mt_eff = mt.copy()
         mt_eff[mt == 6] = 2
+        
+        # Idle drones (Type 3) just do flocking (no task force)
+        idle_mask = (mt_eff == 3)
+        if np.any(idle_mask):
+            ts[alive[idle_mask]] = 0.0
+
         tid = self.assigned_tasks[alive]
         has_task = tid != -1
 
@@ -515,7 +566,7 @@ class SwarmManager3D:
             if np.any(reached):
                 r_idx = idx0[reached]
                 nr = int(np.sum(reached))
-                self.mission_type[r_idx] = np.random.choice([1, 2, 4], size=nr)
+                self.mission_type[r_idx] = 6 # Switch to Coverage
                 self.mission_timer[r_idx] = np.random.uniform(15, 35, size=nr)
                 self.assigned_tasks[r_idx] = -1
                 self.bids[r_idx] = np.inf
@@ -525,24 +576,6 @@ class SwarmManager3D:
                 s_idx = idx0[seeking]
                 ts[s_idx] = self._steer_toward(diff0[seeking], self.velocities[s_idx])
 
-        # M1
-        m1 = (mt_eff == 1) & has_task
-        if np.any(m1):
-            idx1 = alive[m1]
-            n1 = len(idx1)
-            pos1 = self.positions[idx1]
-            tgt1 = self.tasks[tid[m1]]
-            diff1 = pos1 - tgt1
-            dist1 = np.linalg.norm(diff1, axis=1, keepdims=True)
-            radius = 110.0
-
-            tangent = np.column_stack([-diff1[:, 2], np.zeros(n1), diff1[:, 0]])
-            tmag = np.linalg.norm(tangent, axis=1, keepdims=True)
-            tangent = np.divide(tangent, tmag, out=np.zeros_like(tangent), where=tmag > 1e-9)
-
-            correction = ((radius - dist1) / np.maximum(dist1, 1)) * diff1
-            desired = tangent * config.max_speed + correction * 1.5
-            ts[idx1] = self._steer_toward(desired, self.velocities[idx1])
 
         # M2
         m2 = (mt_eff == 2) & has_task
@@ -577,28 +610,12 @@ class SwarmManager3D:
                         else:
                             tv = np.array([gx, gy, gz])
 
-                    self.tasks[6 + (i % 2)] = tv * v_res + (v_res / 2)
+                    self.drone_targets[i] = tv * v_res + (v_res / 2)
                     self.mission_timer[i] = np.random.uniform(5, 10)
 
-            task_idx = 6 + (idx2 % 2)
-            patrol_tgt = self.tasks[task_idx]
-            diff2 = patrol_tgt - pos2
+            diff2 = self.drone_targets[idx2] - pos2
             ts[idx2] = self._steer_toward(diff2, self.velocities[idx2])
 
-        # M4 & M5 ... (kept compact)
-        m4 = (mt_eff == 4) & has_task
-        if np.any(m4):
-            idx4 = alive[m4]
-            diff4 = self.tasks[tid[m4]] - self.positions[idx4]
-            dist4 = np.linalg.norm(diff4, axis=1)
-            desired4 = diff4.copy()
-            close = dist4 < 40.0
-            if np.any(close):
-                c_diff = diff4[close]
-                tangent = np.column_stack([-c_diff[:, 2], np.zeros(int(np.sum(close))), c_diff[:, 0]])
-                tmag = np.linalg.norm(tangent, axis=1, keepdims=True)
-                desired4[close] = np.divide(tangent, tmag, out=np.zeros_like(tangent), where=tmag > 1e-9) * config.max_speed
-            ts[idx4] = self._steer_toward(desired4, self.velocities[idx4])
 
         m5 = (mt_eff == 5) & has_task
         if np.any(m5):
@@ -614,26 +631,50 @@ class SwarmManager3D:
             desired5[:, 1] += (self.tasks[tid[m5]][:, 1] + 100 * np.sin(self.frame_count * 0.02 + idx5.astype(float)) - self.positions[idx5, 1]) * 0.3
             ts[idx5] = self._steer_toward(desired5, self.velocities[idx5])
 
+        # M7: Object Transport (Phase 0: Goto A, Phase 1: Carry to B)
+        m7 = (mt_eff == 7) & has_task
+        if np.any(m7):
+            idx7 = alive[m7]
+            for i_idx, i in enumerate(idx7):
+                phase = self.transport_phase[i]
+                target_pos = self.tasks[8 if phase == 0 else 9]
+                diff = target_pos - self.positions[i]
+                dist = np.linalg.norm(diff)
+                
+                if dist < 40.0:
+                    if phase == 0:
+                        self.transport_phase[i] = 1 # Picked up!
+                    else:
+                        self.mission_type[i] = 3 # Mission Complete -> Idle
+                        self.assigned_tasks[i] = -1
+                        self.transport_phase[i] = 0
+                
+                ts[i] = self._steer_toward(diff[np.newaxis, :], self.velocities[i, np.newaxis])[0]
+
         return ts
 
     def calculate_formation_steer(self):
         fs = np.zeros_like(self.positions)
-        alive = ~self.dead_mask
-        if not np.any(alive): return fs
+        # Only apply rigid formation to drones doing Coverage (6)
+        doing_formation = (~self.dead_mask) & (self.mission_type == 6)
+        if not np.any(doing_formation): return fs
 
-        center = np.mean(self.positions[alive], axis=0)
-        avg_vel = np.mean(self.velocities[alive], axis=0)
+        center = np.mean(self.positions[doing_formation], axis=0)
+        avg_vel = np.mean(self.velocities[doing_formation], axis=0)
         spd = np.linalg.norm(avg_vel)
-        if spd < 1e-3: return fs
+        if spd < 1.0: return fs # Don't form grid if barely moving
 
         dir_vec = avg_vel / spd
         side_vec = np.cross(dir_vec, [0, 1, 0])
+        if np.linalg.norm(side_vec) < 1e-3: side_vec = np.array([1.0, 0.0, 0.0]) # Fallback
+        side_vec = side_vec / np.linalg.norm(side_vec)
 
         row = np.arange(self.num_boids) % 10
         col = np.arange(self.num_boids) // 10
         targets = (center[np.newaxis, :] - dir_vec[np.newaxis, :] * (row[:, np.newaxis] * 60) + side_vec[np.newaxis, :] * (col[:, np.newaxis] * 50 - 250))
+        
         full_steer = self.steer(targets - self.positions, subtract_vels=True)
-        fs[alive] = full_steer[alive]
+        fs[doing_formation] = full_steer[doing_formation]
         return fs
 
     def _failed_drone_avoidance(self, active_idx):

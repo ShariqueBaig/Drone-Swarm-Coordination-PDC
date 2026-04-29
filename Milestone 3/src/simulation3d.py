@@ -58,6 +58,8 @@ class DiscoveryPulse(Entity):
 window.fps_counter.enabled = False
 window.entity_counter.enabled = False
 window.exit_button.visible = False
+window.vsync = False # Unlock FPS by disabling VSync
+application.target_fps = 0 # No internal frame limit
 
 env   = Environment3D()
 swarm = SwarmManager3D(env)
@@ -231,6 +233,12 @@ for t_idx, t_pos in enumerate(swarm.tasks):
     ring = Entity(parent=tm, model='circle', scale=25, rotation_x=90, color=rgb(150, 150, 150, 60), unlit=True)
     task_markers.append({'base': tm, 'icon': icon, 'ring': ring})
 
+# ── CARGO OBJECT (M3 Task) ──────────────────────────────────────────────────
+cargo_box = Entity(model='cube', scale=40, color=rgb(255, 165, 30, 200),
+                   unlit=True, wireframe=True, enabled=False)
+cargo_glow = Entity(parent=cargo_box, model='sphere', scale=1.5, 
+                    color=rgb(255, 165, 30, 40), unlit=True)
+
 # ── HUD ───────────────────────────────────────────────────────────────────────
 ui_panel = Entity(parent=camera.ui, model='quad', scale=(0.38, 0.95),
                   position=(-0.72, 0.0), color=rgb(8, 12, 22, 60))
@@ -349,21 +357,26 @@ reset_btn.on_click = reset_fleet
 highlighted_mission = [-1] 
 
 def select_mission(m_id):
-    if highlighted_mission[0] == m_id: highlighted_mission[0] = -1
-    else: highlighted_mission[0] = m_id
+    if highlighted_mission[0] == m_id: 
+        highlighted_mission[0] = -1
+    else: 
+        highlighted_mission[0] = m_id
+        # Assign this mission to all active/alive drones
+        alive = ~swarm.dead_mask
+        swarm.mission_type[alive] = m_id
+        swarm.assigned_tasks[alive] = -1 # Clear old assignments
+        if m_id == 7: # Reset transport phase if starting transport
+            swarm.transport_phase[alive] = 0
+        print(f"[M3] Fleet Mission Updated: {m_id}")
 
 mission_btns = []
-mission_labels = ['Seeking Tasks', 'Obstacle Fleet', 'Patrol Fleet', 'Swarm Fleet']
+mission_labels = ['Idle / Flocking', 'Object Transport', 'Area Coverage', 'Recall Fleet']
+btn_mission_map = [3, 7, 6, 5]
 for i, label in enumerate(mission_labels):
     btn = Button(parent=mission_hud_panel, text=label, scale=(0.85, 0.08),
                  position=(0.02, 0.32 - i*0.1), color=rgb(60, 60, 60, 50),
-                 on_click=Func(select_mission, i))
+                 on_click=Func(select_mission, btn_mission_map[i]))
     mission_btns.append(btn)
-
-coverage_btn = Button(parent=mission_hud_panel, text='COVERAGE DRONES', scale=(0.85, 0.08),
-                      position=(0.02, -0.08), color=rgb(60, 80, 60, 50),
-                      on_click=Func(select_mission, 6))
-mission_btns.append(coverage_btn)
 
 coverage_text = Text(parent=mission_hud_panel, text='COVERAGE: 0.0%', 
                      position=(0, 0.42), scale=0.55, color=rgb(150, 150, 150), origin=(0,0))
@@ -424,6 +437,10 @@ def _physics_worker():
         try:
             swarm.update()
             frames += 1
+            
+            # Rate limiting removed as per user request to increase performance
+            # time.sleep(0.012) 
+
             curr_t = time.perf_counter()
             if curr_t - last_t >= 1.0:
                 _physics_tps[0] = frames / (curr_t - last_t)
@@ -647,15 +664,39 @@ def update():
             if tid != -1: assigned_count[tid] += 1
         
         for tid, tm_dict in enumerate(task_markers):
+            if tid >= len(assigned_count): continue
+            
+            # ═══ TASK VISIBILITY ═══
+            # Hide diamonds unless drones are actively pursuing them
             if assigned_count[tid] > 0:
+                tm_dict['base'].enabled = True
                 tm_dict['icon'].color = rgb(0, 255, 255, 200)
                 tm_dict['icon'].rotation_y += 100 * time.dt * 6
                 tm_dict['icon'].scale = Vec3(30, 50, 30) * (1.1 + 0.1 * math.sin(_t*5))
                 tm_dict['ring'].color = rgb(255, 200, 0, 150)
             else:
+                tm_dict['base'].enabled = False
                 tm_dict['icon'].color = rgb(150, 150, 150, 150)
                 tm_dict['ring'].color = rgb(150, 150, 150, 60)
                 tm_dict['icon'].rotation_y += 20 * time.dt * 6
+
+    # ═══ CARGO SYNC ═══
+    if _frame[0] % 2 == 0:
+        transporting = (swarm.mission_type == 7) & (swarm.transport_phase == 1)
+        if np.any(transporting):
+            cargo_box.enabled = True
+            c_pos = np.mean(swarm.positions[transporting], axis=0)
+            cargo_box.position = Vec3(c_pos[0], c_pos[1], c_pos[2])
+            cargo_box.rotation_y += 45 * time.dt
+        else:
+            # If anyone is in phase 0, show cargo at pickup point
+            preparing = (swarm.mission_type == 7) & (swarm.transport_phase == 0)
+            if np.any(preparing):
+                cargo_box.enabled = True
+                pickup = swarm.tasks[8]
+                cargo_box.position = Vec3(pickup[0], pickup[1], pickup[2])
+            else:
+                cargo_box.enabled = False
 
     # Force HUD & Macro Swarm Intent (throttled)
     if _frame[0] % 6 == 0:
@@ -694,10 +735,11 @@ def update():
 
     # Mission Button highlight (throttled)
     if _frame[0] % 10 == 0:
-        btn_mission_map = [0, 1, 2, 3, 6]
+        btn_mission_map = [3, 7, 6, 5]
         for i, btn in enumerate(mission_btns):
-            mission_type = btn_mission_map[i] if i < len(btn_mission_map) else i
-            btn.color = rgb(100, 150, 180, 100) if highlighted_mission[0] == mission_type else (rgb(60, 80, 60, 50) if i == 4 else rgb(60, 60, 60, 50))
+            if i < len(btn_mission_map):
+                mission_type = btn_mission_map[i]
+                btn.color = rgb(100, 150, 180, 100) if highlighted_mission[0] == mission_type else rgb(60, 60, 60, 50)
 
     # Coverage Tracking & Telemetry (throttled)
     if _frame[0] % 6 == 0:
@@ -709,27 +751,33 @@ def update():
 
         # ═══ Optimized heatmap rendering (incremental update) ═══
         if show_heatmap or show_vectors:
-            # Find newly discovered voxels using numpy
-            visited_indices = np.argwhere(swarm.visited_grid)
-            new_voxels = []
-            for i, j, k in visited_indices:
-                if not swarm.last_grid[i, j, k]:
-                    new_voxels.append([i, j, k])
+            # ═══ PDC TECHNIQUE: Vectorized Discovery Tracking ═══
+            # Use NumPy bitwise ops instead of slow Python loops for 27,000 cells
+            new_mask = swarm.visited_grid & ~swarm.last_grid
+            new_indices = np.argwhere(new_mask)
             
-            if len(new_voxels) > 0:
-                new_voxels = np.array(new_voxels)
+            if len(new_indices) > 0:
                 voxel_size = np.array([W/swarm.grid_res, H/swarm.grid_res, D/swarm.grid_res])
-                for v in new_voxels:
-                    pos = v * voxel_size + (voxel_size/2)
+                # Bulk convert grid coords to world positions
+                pos_batch = new_indices * voxel_size + (voxel_size/2)
+                
+                for pos in pos_batch:
                     if show_heatmap:
                         hmap_verts.append(Vec3(*pos))
                         hmap_colors.append(rgb(0, 210, 255, 40))
-                    if len(hmap_verts) % 25 == 0:
-                        DiscoveryPulse(pos)
-                if show_heatmap and len(new_voxels) > 0:
-                    hmap_ent.model.vertices = hmap_verts
-                    hmap_ent.model.colors = hmap_colors
-                    hmap_ent.model.generate()  # Only regenerate when new tiles added
+                    if len(hmap_verts) % 10 == 0:
+                        DiscoveryPulse(Vec3(*pos))
+
+                if show_heatmap:
+                    # ═══ CRASH PROTECTION ═══
+                    min_len = min(len(hmap_verts), len(hmap_colors))
+                    if min_len > 0:
+                        hmap_ent.model.vertices = hmap_verts[:min_len]
+                        hmap_ent.model.colors = hmap_colors[:min_len]
+                        try:
+                            hmap_ent.model.generate()
+                        except:
+                            pass
 
         if _t > log_timer:
             log_timer = _t + 1.0
@@ -925,9 +973,14 @@ def input(key):
         show_heatmap = not show_heatmap
         hmap_ent.enabled = show_heatmap
         if show_heatmap:
-            hmap_ent.model.vertices = hmap_verts
-            hmap_ent.model.colors = hmap_colors
-            hmap_ent.model.generate()
+            min_len = min(len(hmap_verts), len(hmap_colors))
+            if min_len > 0:
+                hmap_ent.model.vertices = hmap_verts[:min_len]
+                hmap_ent.model.colors = hmap_colors[:min_len]
+                try:
+                    hmap_ent.model.generate()
+                except:
+                    pass
 
     if key == 'c':
         cinematic_mode = not cinematic_mode

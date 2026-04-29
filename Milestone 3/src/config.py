@@ -25,11 +25,11 @@ seed              = 42
 dt                = 0.02
 
 # ── Rule weights ──────────────────────────────────────────────────────────────
-separation_weight = 2.5
+separation_weight = 12.0      # Significantly increased for strong repulsion
 alignment_weight  = 1.0
-cohesion_weight   = 1.0
+cohesion_weight   = 0.6       # Decreased to allow drones to spread out
 obstacle_weight   = 1.6       # reduced for tighter maneuverability
-boundary_weight   = 1.0
+boundary_weight   = 2.5       # increased to prevent wall clipping
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 BACKGROUND_COLOR = (30, 30, 30)
