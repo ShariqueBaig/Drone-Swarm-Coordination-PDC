@@ -181,12 +181,17 @@ class Environment3D:
 
         # ═══ PDC TECHNIQUE: Data Parallelism ═══
         # Combine static + dynamic into single contiguous array
+        static_obs_arr = np.ascontiguousarray(
+            [[o[0], o[1], o[2], o[3]] for o in self.obstacles],
+            dtype=np.float64,
+        ) if n_static else np.empty((0, 4), dtype=np.float64)
+
         pos = np.empty((total, 3), dtype=np.float64)
         rad = np.empty(total, dtype=np.float64)
 
         if n_static > 0:
-            pos[:n_static] = self._static_obs_arr[:, :3]
-            rad[:n_static] = self._static_obs_arr[:, 3]
+            pos[:n_static] = static_obs_arr[:, :3]
+            rad[:n_static] = static_obs_arr[:, 3]
         if n_dynamic > 0:
             pos[n_static:] = self._dyn_pos
             rad[n_static:] = self._dyn_rad

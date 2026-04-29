@@ -22,7 +22,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from scipy.spatial import cKDTree
 
-from spatial_utils import sort_by_morton, fast_distance_matrix
+from spatial_utils import fast_distance_matrix
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  ASYNCHRONOUS GPU COMPUTE (CUpy STREAMS)
@@ -676,12 +676,6 @@ class SwarmManager3D:
         thread, state_lock prevents read tearing by the visualizer.
         """
         
-        # ═══ PDC TECHNIQUE: Cache Locality (Morton Space-Filling Curves) ═══
-        # Every 60 frames, sort the memory layout using Z-order logic 
-        # so physically close drones occupy adjacent L1/L2 cache lines.
-        if self.frame_count % 60 == 0:
-            sort_by_morton(self.positions, self.velocities, self.mission_type, self.assigned_tasks, 0, self.env.width)
-
         self.metrics.start_frame()
         self.frame_count += 1
 

@@ -3,7 +3,7 @@ simulation3d.py -- Usman (C3.1-C3.5) | PDC Drone Swarm | Milestone 3
 Exhaustive Parallelization & Optimization
 
 KEYS:
-  1 / 2 / 3      Algorithm: Octree | Grid Hash | Naive O(N^2)
+    1 / 2          Algorithm: Naive O(N^2) | Octree
   L              Toggle neighbor lines
   H              Toggle floor heatmap (coverage tiles)
   T              Toggle drone trails
@@ -271,7 +271,7 @@ waypoint_slider.on_value_changed = update_weights
 
 controls_text = Text(
     text='CONTROLS\n'
-         '1/2/3 : Algo      L : Lines\n'
+         '1/2   : Algo      L : Lines\n'
          'T : Trails        H : Map\n'
          'O : Obs Mode      R : Reset\n'
          'C : Cinematic     G : Center\n'
@@ -320,17 +320,7 @@ volume_outline = Entity(model='cube', scale=(W, H, D), position=(W/2, H/2, D/2),
                         color=rgb(0, 210, 255, 15), wireframe=True, unlit=True, enabled=True)
 
 scan_plane = Entity(model='quad', scale=(W, D), rotation_y=90, 
-                    color=rgb(0, 255, 255, 10), unlit=True, enabled=False)
-
-# ── M3: GHOST DRONE (HOSTILE TARGET) ─────────────────────────────────────────
-ghost_drone = Entity(model='diamond', scale=15, color=rgb(255, 0, 80), 
-                     unlit=True, enabled=True)
-Entity(parent=ghost_drone, model='circle', scale=2.5, rotation_x=90, 
-       color=rgb(255, 0, 80, 40), unlit=True)
-ghost_label = Text(parent=ghost_drone, text='HOSTILE', y=1.5, scale=20, 
-                   color=color.red, origin=(0,0), billboarding=True)
-
-emp_pulse = Entity(model='sphere', scale=1, color=rgb(255, 0, 80, 0), unlit=True)
+              color=rgb(0, 255, 255, 10), unlit=True, enabled=False)
 
 # ── MISSION FLEET HUD (C2.3 - Highlighting/Selection) ────────────────────────
 mission_hud_panel = Entity(parent=camera.ui, model='quad', scale=(0.20, 0.75), 
@@ -354,10 +344,6 @@ def reset_fleet():
     print("[M3] Fleet Restored.")
 reset_btn.on_click = reset_fleet
 
-intercept_btn = Button(parent=mission_hud_panel, text='INTERCEPT GHOST', 
-                       scale=(0.85, 0.07), x=0.02, y=-0.16, color=rgb(80, 40, 40, 60))
-intercept_btn.on_click = lambda: select_mission(4)
-
 highlighted_mission = [-1] 
 
 def select_mission(m_id):
@@ -376,7 +362,6 @@ coverage_btn = Button(parent=mission_hud_panel, text='COVERAGE DRONES', scale=(0
                       position=(0.02, -0.08), color=rgb(60, 80, 60, 50),
                       on_click=Func(select_mission, 6))
 mission_btns.append(coverage_btn)
-mission_btns.append(intercept_btn)
 
 coverage_text = Text(parent=mission_hud_panel, text='COVERAGE: 0.0%', 
                      position=(0, 0.42), scale=0.55, color=rgb(150, 150, 150), origin=(0,0))
@@ -498,7 +483,7 @@ def update():
             waypoint_ring.scale_x = 3 * pulse
             waypoint_ring.scale_y = 3 * pulse
 
-    # Ghost in obstacle mode
+    # Obstacle placement ghost preview
     if obs_mode:
         try:
             if hasattr(mouse, 'world_point') and mouse.world_point:
@@ -707,7 +692,7 @@ def update():
 
     # Mission Button highlight (throttled)
     if _frame[0] % 10 == 0:
-        btn_mission_map = [0, 1, 2, 3, 6, 4]
+        btn_mission_map = [0, 1, 2, 3, 6]
         for i, btn in enumerate(mission_btns):
             mission_type = btn_mission_map[i] if i < len(btn_mission_map) else i
             btn.color = rgb(100, 150, 180, 100) if highlighted_mission[0] == mission_type else (rgb(60, 80, 60, 50) if i == 4 else rgb(60, 60, 60, 50))
@@ -762,7 +747,7 @@ def update():
             if hasattr(swarm, 'recall_fleet'): swarm.recall_fleet()
             save_metrics_csv() 
 
-    # Formation Centroid & Ghost
+    # Formation Centroid
     if active_count > 0:
         centroid_marker.enabled = show_centroid
         centroid_marker.position = centroid
@@ -772,27 +757,6 @@ def update():
         gx = W/2 + math.sin(_gt) * W*0.3
         gz = D/2 + math.cos(_gt*1.3) * D*0.3
         gy = H/2 + math.sin(_gt*0.7) * H*0.2
-        ghost_drone.position = (gx, gy, gz)
-        
-        if len(swarm.tasks) > 8:
-            swarm.tasks[8] = (gx, gy, gz)
-        
-        # Intercept Pulse logic
-        if _frame[0] % 4 == 0:
-            intercepting = np.where(~swarm.dead_mask & (swarm.mission_type == 4))[0]
-            if len(intercepting) > 0:
-                d_to_g = np.linalg.norm(swarm.positions[intercepting] - np.array(ghost_drone.position), axis=1)
-                if np.any(d_to_g < 60):
-                    emp_pulse.position = ghost_drone.position
-                    emp_pulse.scale_x += 300 * time.dt * 4
-                    emp_pulse.scale_y = emp_pulse.scale_x
-                    emp_pulse.scale_z = emp_pulse.scale_x
-                    if emp_pulse.scale_x > 180: emp_pulse.scale = (1,1,1)
-                    emp_pulse.color = rgb(255, 0, 80, max(0, 160 - (emp_pulse.scale_x/180)*160))
-                else:
-                    emp_pulse.color = rgb(255, 0, 80, 0); emp_pulse.scale = 1
-            else:
-                emp_pulse.color = rgb(255, 0, 80, 0); emp_pulse.scale = 1
     else:
         centroid_marker.enabled = False
 
@@ -836,7 +800,7 @@ def update():
             f'V: Diagnostics {vec_s}\n'
             f'B: Benchmark {"ON" if show_benchmark else "OFF"}\n'
             f'C: Cinematic {cam_s}\n'
-            f'1/2/3: Algorithm\n'
+            f'1/2: Algorithm\n'
             f'O: Obstacle Mode\n'
             f'R: Reset'
         )
@@ -939,9 +903,8 @@ def input(key):
         print(f"[UI] Benchmark Overlay: {'ON' if show_benchmark else 'OFF'}")
 
     # Algorithm switch
-    if   key == '1': swarm.set_method('octree')
-    elif key == '2': swarm.set_method('grid')
-    elif key == '3': swarm.set_method('naive')
+    if   key == '1': swarm.set_method('naive')
+    elif key == '2': swarm.set_method('octree')
     
     elif key == 'g':
         show_centroid = not show_centroid
