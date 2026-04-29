@@ -538,7 +538,7 @@ class SwarmManager3D:
 
             tangent = np.column_stack([-diff1[:, 2], np.zeros(n1), diff1[:, 0]])
             tmag = np.linalg.norm(tangent, axis=1, keepdims=True)
-            tangent = np.where(tmag > 1e-9, tangent / tmag, 0)
+            tangent = np.divide(tangent, tmag, out=np.zeros_like(tangent), where=tmag > 1e-9)
 
             correction = ((radius - dist1) / np.maximum(dist1, 1)) * diff1
             desired = tangent * config.max_speed + correction * 1.5
@@ -597,7 +597,7 @@ class SwarmManager3D:
                 c_diff = diff4[close]
                 tangent = np.column_stack([-c_diff[:, 2], np.zeros(int(np.sum(close))), c_diff[:, 0]])
                 tmag = np.linalg.norm(tangent, axis=1, keepdims=True)
-                desired4[close] = np.where(tmag > 1e-9, tangent / tmag, 0) * config.max_speed
+                desired4[close] = np.divide(tangent, tmag, out=np.zeros_like(tangent), where=tmag > 1e-9) * config.max_speed
             ts[idx4] = self._steer_toward(desired4, self.velocities[idx4])
 
         m5 = (mt_eff == 5) & has_task
@@ -607,7 +607,7 @@ class SwarmManager3D:
             dist5 = np.linalg.norm(diff5, axis=1)
             tangent = np.column_stack([-diff5[:, 2], np.zeros(len(idx5)), diff5[:, 0]])
             tmag = np.linalg.norm(tangent, axis=1, keepdims=True)
-            tangent = np.where(tmag > 1e-9, tangent / tmag, 0)
+            tangent = np.divide(tangent, tmag, out=np.zeros_like(tangent), where=tmag > 1e-9)
             far = dist5 > (80.0 + (idx5 % 20) * 5.0)
             desired5 = tangent * config.max_speed
             if np.any(far): desired5[far] = diff5[far] * 0.4 + tangent[far] * config.max_speed * 0.7
@@ -668,6 +668,25 @@ class SwarmManager3D:
         self.mission_type[alive] = 5
         self.assigned_tasks[alive] = -1
         self.tasks[9] = target
+
+    def get_robustness_score(self, current_time):
+        """
+        Calculates a robustness score based on swarm coverage efficiency.
+        Robustness = (Coverage / Time) * (Total_Drones / Active_Drones)
+        Normalized to a baseline expectation.
+        """
+        if current_time < 1.0: return 1.0
+        active = np.sum(~self.dead_mask & ~self.failed_mask)
+        if active == 0: return 0.0
+        
+        # Efficiency: Coverage per second per drone
+        efficiency = self.coverage_pct / current_time
+        # Compensation factor: how much more work each active drone is doing
+        compensation = self.num_boids / active
+        
+        # Arbitrary scaling to make 1.0 a 'healthy' score
+        score = (efficiency * compensation) * 0.5
+        return round(min(score, 5.0), 3)
 
     def update(self):
         """
