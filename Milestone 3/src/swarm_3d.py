@@ -127,6 +127,7 @@ class SwarmManager3D:
         self.mission_type = np.full(self.num_boids, 3, dtype=int) # Default to Idle (3)
         self.mission_timer = np.random.rand(self.num_boids) * 30.0
         self.transport_phase = np.zeros(self.num_boids, dtype=int) # 0: Pickup, 1: Dropoff
+        self.delivered_mask = np.zeros(self.num_boids, dtype=bool)
         
         self.failed_mask = np.zeros(self.num_boids, dtype=bool)
         self.fault_injected = False
@@ -644,10 +645,11 @@ class SwarmManager3D:
                 if dist < 40.0:
                     if phase == 0:
                         self.transport_phase[i] = 1 # Picked up!
-                    else:
-                        self.mission_type[i] = 3 # Mission Complete -> Idle
+                    elif phase == 1:
+                        self.transport_phase[i] = 2 # Mission Complete -> Idle
+                        self.delivered_mask[i] = True
+                        self.mission_type[i] = 3
                         self.assigned_tasks[i] = -1
-                        self.transport_phase[i] = 0
                 
                 ts[i] = self._steer_toward(diff[np.newaxis, :], self.velocities[i, np.newaxis])[0]
 

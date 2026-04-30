@@ -367,6 +367,7 @@ def select_mission(m_id):
         swarm.assigned_tasks[alive] = -1 # Clear old assignments
         if m_id == 7: # Reset transport phase if starting transport
             swarm.transport_phase[alive] = 0
+            swarm.delivered_mask[alive] = False
         print(f"[M3] Fleet Mission Updated: {m_id}")
 
 mission_btns = []
@@ -566,6 +567,7 @@ def update():
         local_velocities = swarm.velocities.copy()
         local_dead = swarm.dead_mask.copy()
         local_missions = swarm.mission_type.copy()
+        local_delivered = swarm.delivered_mask.copy()
     
     render_profiler.mark_section('state_copy')
     
@@ -593,7 +595,9 @@ def update():
         h_id = highlighted_mission[0]
         
         # Vectorized color selection (cache-friendly)
-        if show_vectors:
+        if local_delivered[i]:
+            new_key = 'delivered'
+        elif show_vectors:
             new_key = 'vec'
         elif h_id != -1 and local_missions[i] == h_id:
             new_key = 'sel'
@@ -603,7 +607,9 @@ def update():
             new_key = 'norm'
         
         if e._prev_color_key != new_key:
-            if new_key == 'vec':
+            if new_key == 'delivered':
+                e.color = rgb(30, 255, 120); e.scale = 9; e.unlit = True
+            elif new_key == 'vec':
                 e.color = rgb(0, 210, 255); e.scale = 7; e.unlit = False
             elif new_key == 'sel':
                 e.color = color.white; e.scale = 10; e.unlit = True
@@ -683,18 +689,26 @@ def update():
     # ═══ CARGO SYNC ═══
     if _frame[0] % 2 == 0:
         transporting = (swarm.mission_type == 7) & (swarm.transport_phase == 1)
+        delivered = (swarm.mission_type == 7) & (swarm.transport_phase == 2)
+        
         if np.any(transporting):
             cargo_box.enabled = True
             c_pos = np.mean(swarm.positions[transporting], axis=0)
             cargo_box.position = Vec3(c_pos[0], c_pos[1], c_pos[2])
             cargo_box.rotation_y += 45 * time.dt
+        elif np.any(delivered):
+            cargo_box.enabled = True
+            dropoff = swarm.tasks[9]
+            cargo_box.position = Vec3(dropoff[0], dropoff[1], dropoff[2])
+            cargo_box.color = rgb(30, 255, 120, 200)
+            cargo_glow.color = rgb(30, 255, 120, 40)
         else:
-            # If anyone is in phase 0, show cargo at pickup point
             preparing = (swarm.mission_type == 7) & (swarm.transport_phase == 0)
             if np.any(preparing):
                 cargo_box.enabled = True
                 pickup = swarm.tasks[8]
                 cargo_box.position = Vec3(pickup[0], pickup[1], pickup[2])
+                cargo_box.color = rgb(255, 165, 30, 200)
             else:
                 cargo_box.enabled = False
 
