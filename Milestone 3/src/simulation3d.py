@@ -346,20 +346,6 @@ Text(parent=mission_hud_panel, text='[8] fewer    [9] more', position=(0, 0.28),
 Entity(parent=mission_hud_panel, model='quad', scale=(0.9, 0.004),
        position=(0, 0.24), color=rgb(0, 140, 255, 100))
 
-# ── MISSION BUTTONS ───────────────────────────────────────────────────
-Text(parent=mission_hud_panel, text='ASSIGN MISSION', position=(0, 0.20),
-     scale=0.8, color=rgb(180, 180, 180), origin=(0, 0))
-
-mission_btns = []
-mission_labels = ['Idle / Flocking', 'Object Transport', 'Area Coverage', 'Recall Fleet']
-btn_mission_map = [3, 7, 6, 5]
-
-for i, label in enumerate(mission_labels):
-    btn = Button(parent=mission_hud_panel, text=label, scale=(0.85, 0.07),
-                 position=(0, 0.14 - i * 0.09), color=rgb(60, 60, 60, 180),
-                 on_click=Func(select_mission, btn_mission_map[i]))
-    mission_btns.append(btn)
-
 Entity(parent=mission_hud_panel, model='quad', scale=(0.9, 0.004),
        position=(0, -0.24), color=rgb(0, 140, 255, 100))
 
@@ -428,6 +414,20 @@ def select_mission(m_id):
             swarm.assigned_tasks[alive] = -1
             
         print(f"[M3] Fleet Mission Updated: {m_id}")
+
+# ── MISSION BUTTONS ───────────────────────────────────────────────────
+Text(parent=mission_hud_panel, text='ASSIGN MISSION', position=(0, 0.20),
+     scale=0.8, color=rgb(180, 180, 180), origin=(0, 0))
+
+mission_btns = []
+mission_labels = ['Idle / Flocking', 'Object Transport', 'Area Coverage', 'Recall Fleet']
+btn_mission_map = [3, 7, 6, 5]
+
+for i, label in enumerate(mission_labels):
+    btn = Button(parent=mission_hud_panel, text=label, scale=(0.85, 0.07),
+                 position=(0, 0.14 - i * 0.09), color=rgb(60, 60, 60, 180),
+                 on_click=Func(select_mission, btn_mission_map[i]))
+    mission_btns.append(btn)
 
 # Mission Success Banner
 mission_banner = Entity(parent=camera.ui, model='quad', scale=(0.8, 0.15), 
