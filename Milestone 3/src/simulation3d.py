@@ -58,6 +58,8 @@ class DiscoveryPulse(Entity):
 window.fps_counter.enabled = False
 window.entity_counter.enabled = False
 window.exit_button.visible = False
+window.collider_counter.enabled = False
+window.cog_menu.enabled = False
 window.vsync = False # Unlock FPS by disabling VSync
 application.target_fps = 0 # No internal frame limit
 
@@ -327,24 +329,35 @@ scan_plane = Entity(model='quad', scale=(W, D), rotation_y=90,
               color=rgb(0, 255, 255, 10), unlit=True, enabled=False)
 
 # ── MISSION FLEET HUD (C2.3 - Highlighting/Selection) ────────────────────────
-mission_hud_panel = Entity(parent=camera.ui, model='quad', scale=(0.20, 0.75), 
-                           position=(0.78, -0.1), color=rgb(8, 12, 22, 40))
-Entity(parent=camera.ui, model='quad', scale=(0.205, 0.755),
-       position=(0.78, -0.1), color=rgb(0, 140, 255, 8), z=0.01)
-Text(parent=mission_hud_panel, text='FLEET COMMAND', position=(0, 0.46), scale=0.65, color=rgb(150, 150, 150), origin=(0,0))
+mission_hud_panel = Entity(parent=camera.ui, model='quad', scale=(0.30, 0.85),
+                           position=(0.74, -0.08), color=rgb(8, 12, 22, 200))
+Entity(parent=camera.ui, model='quad', scale=(0.305, 0.855),
+       position=(0.74, -0.08), color=rgb(0, 140, 255, 40), z=0.01)
+
+# Panel title
+Text(parent=mission_hud_panel, text='FLEET COMMAND', position=(0, 0.46),
+     scale=1.4, color=rgb(0, 200, 255), origin=(0, 0))
+
+# Divider line under title
+Entity(parent=mission_hud_panel, model='quad', scale=(0.88, 0.005),
+       position=(0, 0.41), color=rgb(0, 160, 255, 180))
 
 # ── TRANSPORT DRONE COUNT DISPLAY ─────────────────────────────────────
-Text(parent=mission_hud_panel, text='TRANSPORT SIZE', position=(0, 0.39), 
-     scale=0.5, color=rgb(180, 180, 180), origin=(0,0))
-transport_count_label = Text(parent=mission_hud_panel, text=str(config.transport_drone_count), 
-                              position=(0, 0.35), scale=1.2, color=color.orange, origin=(0,0))
-Text(parent=mission_hud_panel, text='8 / 9 keys to adjust', position=(0, 0.31), 
-     scale=0.35, color=rgb(120, 120, 120), origin=(0,0))
+Text(parent=mission_hud_panel, text='TRANSPORT DRONES', position=(0, 0.36),
+     scale=1.0, color=rgb(200, 200, 200), origin=(0, 0))
+transport_count_label = Text(parent=mission_hud_panel, text=str(config.transport_drone_count),
+                              position=(0, 0.28), scale=2.5, color=color.orange, origin=(0, 0))
+Text(parent=mission_hud_panel, text='8 = fewer      9 = more', position=(0, 0.21),
+     scale=0.85, color=rgb(160, 160, 160), origin=(0, 0))
+
+# Divider
+Entity(parent=mission_hud_panel, model='quad', scale=(0.88, 0.005),
+       position=(0, 0.16), color=rgb(0, 140, 255, 100))
 
 fault_btn = Button(parent=mission_hud_panel, text='FAULT INJECTION',
-                   scale=(0.8, 0.05), position=(0, -0.28), color=rgb(80, 40, 40, 60))
+                   scale=(0.82, 0.075), position=(0, -0.33), color=rgb(120, 40, 40, 220))
 reset_btn = Button(parent=mission_hud_panel, text='RESET FLEET',
-                   scale=(0.8, 0.05), position=(0, -0.36), color=rgb(40, 80, 40, 60))
+                   scale=(0.82, 0.075), position=(0, -0.43), color=rgb(40, 110, 40, 220))
 
 def inject_fault():
     swarm.inject_faults(0.2)
@@ -408,14 +421,23 @@ def select_mission(m_id):
 mission_btns = []
 mission_labels = ['Idle / Flocking', 'Object Transport', 'Area Coverage', 'Recall Fleet']
 btn_mission_map = [3, 7, 6, 5]
+
+# Label above buttons
+Text(parent=mission_hud_panel, text='ASSIGN MISSION', position=(0, 0.13),
+     scale=1.0, color=rgb(180, 180, 180), origin=(0, 0))
+
 for i, label in enumerate(mission_labels):
-    btn = Button(parent=mission_hud_panel, text=label, scale=(0.85, 0.08),
-                 position=(0.02, 0.32 - i*0.1), color=rgb(60, 60, 60, 50),
+    btn = Button(parent=mission_hud_panel, text=label, scale=(0.85, 0.095),
+                 position=(0, 0.06 - i * 0.12), color=rgb(60, 60, 60, 180),
                  on_click=Func(select_mission, btn_mission_map[i]))
     mission_btns.append(btn)
 
-coverage_text = Text(parent=mission_hud_panel, text='COVERAGE: 0.0%', 
-                     position=(0, 0.42), scale=0.55, color=rgb(150, 150, 150), origin=(0,0))
+# Divider above fault buttons
+Entity(parent=mission_hud_panel, model='quad', scale=(0.88, 0.005),
+       position=(0, -0.40), color=rgb(0, 140, 255, 100))
+
+coverage_text = Text(parent=mission_hud_panel, text='COVERAGE: 0.0%',
+                     position=(0, -0.47), scale=1.1, color=rgb(0, 210, 255), origin=(0, 0))
 
 # Mission Success Banner
 mission_banner = Entity(parent=camera.ui, model='quad', scale=(0.8, 0.15), 
