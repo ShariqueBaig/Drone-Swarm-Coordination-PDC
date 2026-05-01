@@ -9,6 +9,8 @@ KEYS:
     1           Switch to Naive neighbor-finding
     2           Switch to KDTree (quadtree) neighbor-finding
     F           Inject faults (20% drones)
+    Shift+LClick Place Obstacle (User)
+    Shift+RClick Remove Obstacle
     LClick      Select Mission / Set Waypoint on world
     RClick      Clear Waypoint
 """
@@ -32,6 +34,7 @@ C_GRID          = (30, 40, 60)
 C_BOUNDARY      = (55, 105, 190)
 C_DRONE         = (0, 210, 255)
 C_DRONE_SEL     = (255, 255, 255)
+C_DRONE_CARRY   = (255, 200, 0)   # Color when carrying object
 C_DRONE_DEAD    = (255, 30, 30)
 C_DRONE_FAILED  = (255, 140, 30)
 C_CARGO         = (255, 165, 30)
@@ -44,6 +47,8 @@ C_COVERAGE      = (0, 210, 255, 40)
 C_OBSTACLE      = (215, 35, 55)
 C_DYN_OBS       = (180, 50, 200)
 C_WAYPOINT      = (0, 255, 120)
+C_DROPOFF       = (255, 50, 50)
+C_PICKUP        = (0, 255, 100)
 
 class Camera2D:
     """Maps world coordinates (x, y) to screen pixels."""
@@ -73,6 +78,50 @@ class Camera2D:
         """World length → screen pixels."""
         return max(1, int(l * self.scale))
 
+class Slider:
+    """Simple UI slider for numerical parameters."""
+    def __init__(self, x, y, w, h, min_val, max_val, initial_val, label):
+        self.rect = pygame.Rect(x, y, w, h)
+        # Hitbox is slightly larger than visual track
+        self.hitbox = pygame.Rect(x, y - 10, w, h + 20)
+        self.min_val = min_val
+        self.max_val = max_val
+        self.val = initial_val
+        self.label = label
+        self.grabbed = False
+
+    def draw(self, surface, font):
+        # Label
+        txt = font.render(f"{self.label}: {int(self.val)}", True, (200, 200, 200))
+        surface.blit(txt, (self.rect.x, self.rect.y - 25))
+        
+        # Track
+        pygame.draw.rect(surface, (40, 50, 70), self.rect, border_radius=4)
+        pygame.draw.rect(surface, (60, 70, 90), self.rect, 1, border_radius=4)
+        
+        # Handle
+        pos_x = self.rect.x + (self.val - self.min_val) / (self.max_val - self.min_val) * self.rect.width
+        handle_rect = pygame.Rect(pos_x - 8, self.rect.y - 4, 16, self.rect.height + 8)
+        pygame.draw.rect(surface, (0, 210, 255), handle_rect, border_radius=4)
+        pygame.draw.rect(surface, (255, 255, 255), handle_rect, 1, border_radius=4)
+
+    def handle_event(self, event):
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            if self.hitbox.collidepoint(event.pos):
+                self.grabbed = True
+                return True
+        elif event.type == pygame.MOUSEBUTTONUP:
+            if self.grabbed:
+                self.grabbed = False
+                return True
+        elif event.type == pygame.MOUSEMOTION:
+            if self.grabbed:
+                rel_x = event.pos[0] - self.rect.x
+                self.val = self.min_val + (rel_x / self.rect.width) * (self.max_val - self.min_val)
+                self.val = max(self.min_val, min(self.max_val, self.val))
+                return True
+        return False
+
 
 def draw_coverage_grid(surface, cam, swarm):
     """Draw 2D coverage heatmap overlay."""
@@ -93,7 +142,7 @@ def draw_coverage_grid(surface, cam, swarm):
     surface.blit(overlay, (0, 0))
 
 
-def draw_hud_panel(surface, font, swarm, fps, physics_tps, highlighted_mission, btns, method_name):
+def draw_hud_panel(surface, font, swarm, fps, physics_tps, highlighted_mission, btns, method_name, slider, start_time):
     # Left Panel
     panel_surf = pygame.Surface((260, 420), pygame.SRCALPHA)
     panel_surf.fill(C_PANEL)
@@ -132,6 +181,8 @@ def draw_hud_panel(surface, font, swarm, fps, physics_tps, highlighted_mission, 
         "SPACE: Pause   R: Reset",
         "1: Naive  2: KDTree  3: Grid",
         "F: Inject Faults",
+        "Shift+LClick: Place Obs",
+        "Shift+RClick: Rem Obs",
         "LClick: Set Waypoint",
         "RClick: Clear Waypoint",
     ]
@@ -141,7 +192,7 @@ def draw_hud_panel(surface, font, swarm, fps, physics_tps, highlighted_mission, 
         surface.blit(txt, (20, 25 + i * 20))
 
     # Right Panel (Missions)
-    m_panel = pygame.Surface((220, 310), pygame.SRCALPHA)
+    m_panel = pygame.Surface((220, 420), pygame.SRCALPHA)
     m_panel.fill(C_PANEL)
     surface.blit(m_panel, (surface.get_width() - 230, 10))
 
@@ -164,13 +215,15 @@ def draw_hud_panel(surface, font, swarm, fps, physics_tps, highlighted_mission, 
         txt = font.render(label, True, (255, 255, 255))
         surface.blit(txt, (rect.centerx - txt.get_width() // 2, rect.centery - txt.get_height() // 2))
 
+    # Slider and labels
+    slider.draw(surface, font)
+
     # Coverage bar at bottom of mission panel
     cov_txt = font.render(f"COVERAGE: {cov:.1f}%", True, (150, 150, 150))
-    surface.blit(cov_txt, (surface.get_width() - 220, 310))
+    surface.blit(cov_txt, (surface.get_width() - 220, 400))
 
 
 def main():
-    global start_time
     pygame.init()
 
     env = Environment()
@@ -187,6 +240,10 @@ def main():
 
     highlighted_mission = 3  # Idle by default
     btns = [(None, -1)] * 4
+    
+    # Slider for team size (1-100)
+    team_slider = Slider(SW - 215, 360, 190, 20, 1, 100, swarm.transport_team_size, "Team Size")
+
     paused = False
     physics_tps = [0.0]
     show_coverage = True
@@ -249,31 +306,56 @@ def main():
                     print("[SIM] Fault injected: 20%")
                 elif event.key == pygame.K_h:
                     show_coverage = not show_coverage
-            elif event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button == 1:  # Left click
-                    # Check mission buttons first
-                    clicked_btn = False
-                    for btn in btns:
-                        if not btn:
-                            continue
-                        b_rect, m_id = btn
-                        if b_rect and b_rect.collidepoint(event.pos):
-                            highlighted_mission = m_id
-                            swarm.set_fleet_mission(m_id)
-                            print(f"[SIM] Fleet Mission: {m_id}")
-                            clicked_btn = True
-                            break
-                    if not clicked_btn:
-                        # Set waypoint on world
-                        wx, wy = cam.sw(event.pos[0], event.pos[1])
-                        if 0 <= wx <= env.width and 0 <= wy <= env.height:
-                            env.target_waypoint = np.array([wx, wy])
-                            waypoint_marker = (wx, wy)
-                            print(f"[SIM] Waypoint set: ({wx:.0f}, {wy:.0f})")
-                elif event.button == 3:  # Right click
-                    env.target_waypoint = None
-                    waypoint_marker = None
-                    print("[SIM] Waypoint cleared")
+            elif event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
+                if team_slider.handle_event(event):
+                    if swarm.transport_team_size != int(team_slider.val):
+                        swarm.transport_team_size = int(team_slider.val)
+                        print(f"[SIM] Team Size set to: {swarm.transport_team_size}")
+                    continue
+
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    if event.button == 1:  # Left click
+                        # Check mission buttons first
+                        clicked_btn = False
+                        for btn in btns:
+                            if not btn:
+                                continue
+                            b_rect, m_id = btn
+                            if b_rect and b_rect.collidepoint(event.pos):
+                                highlighted_mission = m_id
+                                swarm.set_fleet_mission(m_id)
+                                print(f"[SIM] Fleet Mission: {m_id} | Team Size: {swarm.transport_team_size}")
+                                clicked_btn = True
+                                break
+                        if not clicked_btn:
+                            # Check for keyboard modifiers (Shift) to place obstacle
+                            mods = pygame.key.get_mods()
+                            if mods & pygame.KMOD_SHIFT:
+                                wx, wy = cam.sw(event.pos[0], event.pos[1])
+                                if 0 <= wx <= env.width and 0 <= wy <= env.height:
+                                    env.add_user_obstacle(wx, wy, 40.0)
+                                    print(f"[SIM] User obstacle placed at ({wx:.0f}, {wy:.0f})")
+                                    clicked_btn = True
+                            
+                            if not clicked_btn:
+                                # Set waypoint on world
+                                wx, wy = cam.sw(event.pos[0], event.pos[1])
+                                if 0 <= wx <= env.width and 0 <= wy <= env.height:
+                                    env.target_waypoint = np.array([wx, wy])
+                                    waypoint_marker = (wx, wy)
+                                    print(f"[SIM] Waypoint set: ({wx:.0f}, {wy:.0f})")
+                    elif event.button == 3:  # Right click
+                        mods = pygame.key.get_mods()
+                        if mods & pygame.KMOD_SHIFT:
+                            wx, wy = cam.sw(event.pos[0], event.pos[1])
+                            if env.remove_obstacle_at(wx, wy):
+                                print(f"[SIM] Obstacle removed at ({wx:.0f}, {wy:.0f})")
+                            else:
+                                print("[SIM] No obstacle found at click point")
+                        else:
+                            env.target_waypoint = None
+                            waypoint_marker = None
+                            print("[SIM] Waypoint cleared")
 
         # ── Rendering ─────────────────────────────────────────────────────────
         screen.fill(C_BG)
@@ -340,13 +422,31 @@ def main():
                 pygame.draw.polygon(screen, C_TASK, pts, 2)
                 pygame.draw.circle(screen, (255, 200, 0), p, cam.wl(18), 1)
 
-        # Cargo box
+        # Cargo box and markers
+        if np.any(local_mission == 7):
+            # Draw Pickup Point (Tasks 8)
+            p_pick = cam.ws(local_tasks[8])
+            r_pick = cam.wl(25)
+            pygame.draw.rect(screen, C_PICKUP, (p_pick[0] - r_pick, p_pick[1] - r_pick, r_pick * 2, r_pick * 2), 2)
+            pygame.draw.circle(screen, C_PICKUP, p_pick, 5)
+            txt_pick = font.render("PICKUP", True, C_PICKUP)
+            screen.blit(txt_pick, (p_pick[0] - txt_pick.get_width() // 2, p_pick[1] + r_pick + 5))
+
+            # Draw Dropoff Point (Tasks 9)
+            p_drop = cam.ws(local_tasks[9])
+            r_drop = cam.wl(25)
+            pygame.draw.rect(screen, C_DROPOFF, (p_drop[0] - r_drop, p_drop[1] - r_drop, r_drop * 2, r_drop * 2), 2)
+            pygame.draw.circle(screen, C_DROPOFF, p_drop, 5)
+            txt_drop = font.render("DROPOFF", True, C_DROPOFF)
+            screen.blit(txt_drop, (p_drop[0] - txt_drop.get_width() // 2, p_drop[1] + r_drop + 5))
+
         transporting = (local_mission == 7) & (local_phase == 1)
         if np.any(transporting):
             c_pos = np.mean(local_pos[transporting], axis=0)
             p = cam.ws(c_pos)
             r = cam.wl(15)
-            pygame.draw.rect(screen, C_CARGO, (p[0] - r, p[1] - r, r * 2, r * 2), 2)
+            pygame.draw.rect(screen, C_CARGO, (p[0] - r, p[1] - r, r * 2, r * 2), 0) # Solid when moving
+            pygame.draw.rect(screen, (255, 255, 255), (p[0] - r, p[1] - r, r * 2, r * 2), 2)
         else:
             preparing = (local_mission == 7) & (local_phase == 0)
             if np.any(preparing):
@@ -367,8 +467,17 @@ def main():
                 pygame.draw.circle(screen, C_DRONE_FAILED, p, 4)
                 continue
 
+            # Mission-based coloring
             is_sel = (highlighted_mission != -1 and local_mission[i] == highlighted_mission)
             color = C_DRONE_SEL if is_sel else C_DRONE
+            
+            # Special coloring for transport mission
+            if local_mission[i] == 7:
+                if local_phase[i] == 1:
+                    color = C_DRONE_CARRY
+                else:
+                    color = C_PICKUP # Headed to pickup
+
             radius = 5 if is_sel else 4
             pygame.draw.circle(screen, color, p, radius)
 
@@ -382,12 +491,13 @@ def main():
 
         # HUD
         draw_hud_panel(screen, font, swarm, clock.get_fps(), physics_tps[0],
-                       highlighted_mission, btns, swarm.use_method)
+                       highlighted_mission, btns, swarm.use_method, team_slider, start_time)
 
         pygame.display.flip()
         clock.tick(60)
 
     pygame.quit()
+
 
 if __name__ == "__main__":
     main()

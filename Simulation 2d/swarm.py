@@ -88,6 +88,8 @@ class SwarmManager:
         self.grid_res = 30
         # 2D coverage grid: (30, 30)
         self.visited_grid = np.zeros((self.grid_res, self.grid_res), dtype=bool)
+        self.reserved_grid = np.full((self.grid_res, self.grid_res), -1, dtype=int) # New: tracks which drone is targeting which cell
+        self._mark_obstacles_covered()  # New: mark obstacles as already covered
         self.last_grid = np.zeros((self.grid_res, self.grid_res), dtype=bool)
 
         self._pool = ThreadPoolExecutor(max_workers=config.num_threads)
@@ -133,6 +135,28 @@ class SwarmManager:
     def coverage_pct(self):
         visited_count = np.count_nonzero(self.visited_grid)
         return (visited_count / (self.grid_res ** 2)) * 100
+
+    def _mark_obstacles_covered(self):
+        """Mark cells containing obstacles as pre-covered (System obstacles only)."""
+        obs_pos, obs_rad = self.env.get_obstacle_arrays(exclude_user=True)
+        if len(obs_rad) == 0:
+            return
+        
+        cw = self.env.width / self.grid_res
+        ch = self.env.height / self.grid_res
+        
+        x = np.linspace(cw/2, self.env.width - cw/2, self.grid_res)
+        y = np.linspace(ch/2, self.env.height - ch/2, self.grid_res)
+        xv, yv = np.meshgrid(x, y, indexing='ij')
+        cell_centers = np.stack([xv, yv], axis=-1).reshape(-1, 2)
+        
+        diff = cell_centers[:, np.newaxis, :] - obs_pos[np.newaxis, :, :]
+        dist_sq = np.sum(diff**2, axis=-1)
+        
+        # A cell is covered if its center is within its own radius of the obstacle
+        # We use a slight padding to ensure obstacles are fully 'masked'
+        is_covered = np.any(dist_sq < (obs_rad + 10.0)**2, axis=1)
+        self.visited_grid |= is_covered.reshape(self.grid_res, self.grid_res)
 
     # ─────────────────────────────────────────────────────────────────────────
     #  Neighbor-Finding Algorithms
@@ -280,6 +304,12 @@ class SwarmManager:
         if np.any(sm):
             v = diff[sm] / np.maximum(dist[sm, np.newaxis], 1e-9)
             weight = (config.safety_distance - dist[sm]) / config.safety_distance
+            
+            # Boost separation for coverage drones (Type 6) to encourage spreading
+            is_cov_i = self.mission_type[ii[sm]] == 6
+            is_cov_j = self.mission_type[jj[sm]] == 6
+            weight[is_cov_i | is_cov_j] *= 2.0
+            
             v *= weight[:, np.newaxis]
             np.add.at(sep_f, ii[sm], v)
             np.add.at(sep_f, jj[sm], -v)
@@ -620,23 +650,41 @@ class SwarmManager:
                     i = idx2[k]
                     gx, gy = int(gxy[k, 0]), int(gxy[k, 1])
 
-                    stolen = self._steal_work()
-                    if stolen is not None:
-                        tv = np.array(stolen)
-                    else:
-                        sr = 8 if self.mission_type[i] == 6 else 4
-                        rx = slice(max(0, gx - sr), min(self.grid_res, gx + sr))
-                        ry = slice(max(0, gy - sr), min(self.grid_res, gy + sr))
+                    # Clear old reservation
+                    old_target = ((self.drone_targets[i] / v_res).astype(int))
+                    if 0 <= old_target[0] < self.grid_res and 0 <= old_target[1] < self.grid_res:
+                        if self.reserved_grid[old_target[0], old_target[1]] == i:
+                            self.reserved_grid[old_target[0], old_target[1]] = -1
 
-                        lu = np.argwhere(~self.visited_grid[rx, ry])
-                        if len(lu) > 0:
-                            c = lu[np.random.randint(len(lu))]
-                            tv = np.array([c[0] + rx.start, c[1] + ry.start])
+                    # 1. Greedy Spatial Search (Nearest unvisited & unreserved)
+                    sr = 12 if self.mission_type[i] == 6 else 6
+                    rx = slice(max(0, gx - sr), min(self.grid_res, gx + sr))
+                    ry = slice(max(0, gy - sr), min(self.grid_res, gy + sr))
+
+                    # Find candidates that are unvisited AND not reserved by others
+                    candidates = np.argwhere(~self.visited_grid[rx, ry] & (self.reserved_grid[rx, ry] == -1))
+                    
+                    if len(candidates) > 0:
+                        # Pick nearest to current grid position
+                        rel_pos = candidates - [gx - rx.start, gy - ry.start]
+                        dists = np.sum(rel_pos**2, axis=1)
+                        best_idx = np.argmin(dists)
+                        c = candidates[best_idx]
+                        tv = np.array([c[0] + rx.start, c[1] + ry.start])
+                        
+                        # Reserve it
+                        self.reserved_grid[tv[0], tv[1]] = i
+                    else:
+                        # 2. Fallback: Work Stealing
+                        stolen = self._steal_work()
+                        if stolen is not None:
+                            tv = np.array(stolen)
+                            self.reserved_grid[tv[0], tv[1]] = i
                         else:
                             tv = np.array([gx, gy])
 
-                    self.drone_targets[i] = tv * v_res + (v_res / 2)
-                    self.mission_timer[i] = np.random.uniform(5, 10)
+                    self.drone_targets[i] = (tv + 0.5) * v_res
+                    self.mission_timer[i] = 15.0 + np.random.rand() * 10.0
 
             diff2 = self.drone_targets[idx2] - pos2
             ts[idx2] = self._steer_toward(diff2, self.velocities[idx2])
@@ -661,22 +709,32 @@ class SwarmManager:
         m7 = (mt_eff == 7) & has_task
         if np.any(m7):
             idx7 = alive[m7]
-            for i_idx, i in enumerate(idx7):
+            # Collective Phase Management
+            phase0_idx = idx7[self.transport_phase[idx7] == 0]
+            if len(phase0_idx) > 0:
+                pickup_pos = self.tasks[8]
+                dist_to_pickup = np.linalg.norm(self.positions[phase0_idx] - pickup_pos, axis=1)
+                
+                # If majority/all drones are close enough, switch all to Phase 1
+                if np.mean(dist_to_pickup) < 60.0 or np.all(dist_to_pickup < 100.0):
+                    self.transport_phase[idx7] = 1
+            
+            # Steering logic for each drone based on its current phase
+            for i in idx7:
                 phase = self.transport_phase[i]
                 target_pos = self.tasks[8 if phase == 0 else 9]
                 diff = target_pos - self.positions[i]
                 dist = np.linalg.norm(diff)
 
-                if dist < 40.0:
-                    if phase == 0:
-                        self.transport_phase[i] = 1
-                    else:
-                        self.mission_type[i] = 3
-                        self.assigned_tasks[i] = -1
-                        self.bids[i] = np.inf
-                        self.transport_phase[i] = 0
-
-                ts[i] = self._steer_toward(diff[np.newaxis, :], self.velocities[i, np.newaxis])[0]
+                if phase == 1 and dist < 45.0:
+                    # Individual completion check for Phase 1 (Dropoff)
+                    # We switch back to idle individually once arrived at dropoff
+                    self.mission_type[i] = 3
+                    self.assigned_tasks[i] = -1
+                    self.bids[i] = np.inf
+                    self.transport_phase[i] = 0
+                else:
+                    ts[i] = self._steer_toward(diff[np.newaxis, :], self.velocities[i, np.newaxis])[0]
 
         return ts
 
@@ -805,6 +863,14 @@ class SwarmManager:
                 0, self.grid_res - 1,
             )
             self.visited_grid[gx, gy] = True
+            # Clear reservation once visited
+            self.reserved_grid[gx, gy] = -1
+        
+        # New: Re-mark obstacles as covered (handles moving obstacles too)
+        self._mark_obstacles_covered()
+        # Also clear reservations on obstacles
+        self.reserved_grid[self.visited_grid] = -1
+
         if self.frame_count % 100 == 0:
             self._repopulate_work_queue()
         self.metrics.end_section("coverage_grid")

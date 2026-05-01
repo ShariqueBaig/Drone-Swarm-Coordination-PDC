@@ -123,6 +123,9 @@ class Environment:
         # ── A2.3 dynamic obstacles ────────────────────────────────────────────
         self.dynamic_obstacles: list[DynamicObstacle] = []
 
+        # ── User-placed obstacles ───────────────────────────────────────────
+        self.user_obstacles: list = []
+
         # ── A2.4 hot-reload tracking ──────────────────────────────────────────
         self._config_mtime: float = 0.0
 
@@ -146,7 +149,35 @@ class Environment:
         return self._obstacles_cache
 
     def _rebuild_obstacle_cache(self):
-        self._obstacles_cache = list(self._static_obstacles) + list(self.dynamic_obstacles)
+        self._obstacles_cache = (
+            list(self._static_obstacles) + 
+            list(self.dynamic_obstacles) + 
+            list(self.user_obstacles)
+        )
+
+    def add_user_obstacle(self, x, y, r=40.0):
+        self.user_obstacles.append((x, y, r))
+        self._rebuild_obstacle_cache()
+
+    def remove_obstacle_at(self, x, y):
+        """Remove the nearest obstacle within its radius of (x, y)."""
+        # Search User -> Static -> Dynamic
+        for i, ob in enumerate(self.user_obstacles):
+            if math.sqrt((ob[0]-x)**2 + (ob[1]-y)**2) < ob[2]:
+                self.user_obstacles.pop(i)
+                self._rebuild_obstacle_cache()
+                return True
+        for i, ob in enumerate(self._static_obstacles):
+            if math.sqrt((ob[0]-x)**2 + (ob[1]-y)**2) < ob[2]:
+                self._static_obstacles.pop(i)
+                self._rebuild_obstacle_cache()
+                return True
+        for i, ob in enumerate(self.dynamic_obstacles):
+            if math.sqrt((ob.x-x)**2 + (ob.y-y)**2) < ob.radius:
+                self.dynamic_obstacles.pop(i)
+                self._rebuild_obstacle_cache()
+                return True
+        return False
 
     # ──────────────────────────────────────────────────────────────────────────
     # A2.4 — Config hot-reload
@@ -275,16 +306,20 @@ class Environment:
     # Vectorized obstacle arrays (used by SwarmManager)
     # ──────────────────────────────────────────────────────────────────────────
 
-    def get_obstacle_arrays(self):
+    def get_obstacle_arrays(self, exclude_user=False):
         """
-        Return all obstacles as NumPy arrays for vectorized computation.
+        Return obstacles as NumPy arrays for vectorized computation.
+        
+        Parameters
+        ----------
+        exclude_user : bool
+            If True, only returns static/dynamic obstacles from config.
+        """
+        if exclude_user:
+            obs = list(self._static_obstacles) + list(self.dynamic_obstacles)
+        else:
+            obs = self._obstacles_cache
 
-        Returns
-        -------
-        obs_pos : ndarray (M, 2)  — obstacle centre positions
-        obs_rad : ndarray (M,)    — obstacle radii
-        """
-        obs = self._obstacles_cache
         if len(obs) == 0:
             return np.zeros((0, 2)), np.zeros(0)
 
