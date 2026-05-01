@@ -540,18 +540,20 @@ def update():
     if held_keys['=']:   editor_cam.position += fwd * CAM_ZOOM * time.dt
     if held_keys['-']:   editor_cam.position -= fwd * CAM_ZOOM * time.dt
 
-        # Transport drone count adjustment (static vars to prevent rapid fire)
+    # Transport drone count adjustment (static vars to prevent rapid fire)
     if not hasattr(update, '_transport_last_press'):
         update._transport_last_press = 0
     
     now = time.time()
     if held_keys['8'] and (now - update._transport_last_press) > 0.3:
         config.transport_drone_count = max(1, config.transport_drone_count - 5)
+        transport_count_label.text = str(config.transport_drone_count)
         update._transport_last_press = now
         print(f"[TRANSPORT] Drone count: {config.transport_drone_count}")
         
     if held_keys['9'] and (now - update._transport_last_press) > 0.3:
         config.transport_drone_count = min(swarm.num_boids, config.transport_drone_count + 5)
+        transport_count_label.text = str(config.transport_drone_count)
         update._transport_last_press = now
         print(f"[TRANSPORT] Drone count: {config.transport_drone_count}")
     
@@ -946,7 +948,6 @@ def save_metrics_csv():
     swarm.metrics.print_report()
 
 def input(key):
-    print(f"[DEBUG] Key pressed: '{key}'")  # ADD THIS LINE FIRST
     global cinematic_mode, obs_mode, obs_moving_mode
     global show_neighbor_lines, show_heatmap, show_trails, show_vectors, show_centroid
     global show_benchmark
@@ -955,11 +956,13 @@ def input(key):
     # ── TRANSPORT DRONE COUNT (check FIRST) ─────────────────────────
     if key == '9':
         config.transport_drone_count = min(swarm.num_boids, config.transport_drone_count + 5)
+        transport_count_label.text = str(config.transport_drone_count)
         print(f"[UI] Transport drones: {config.transport_drone_count}")
         return
         
     if key == '8':
         config.transport_drone_count = max(1, config.transport_drone_count - 5)
+        transport_count_label.text = str(config.transport_drone_count)
         print(f"[UI] Transport drones: {config.transport_drone_count}")
         return
     # ────────────────────────────────────────────────────────────────
