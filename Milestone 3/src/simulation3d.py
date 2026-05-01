@@ -45,7 +45,7 @@ def rgb(r, g, b, a=255):
 # ── APP ───────────────────────────────────────────────────────────────────────
 app = Ursina(borderless=False, title='PDC Drone Swarm | M3 | Parallelized')
 app.start_time = time.time()
-app.setBackgroundColor(rgb(4, 6, 13)) # Ensure safe clear color
+app.setBackgroundColor(rgb(4, 6, 13))
 
 # Discovery Pulse Effect (M2.7 - High Performance)
 class DiscoveryPulse(Entity):
@@ -60,13 +60,13 @@ window.entity_counter.enabled = False
 window.exit_button.visible = False
 window.collider_counter.enabled = False
 window.cog_menu.enabled = False
-window.vsync = False # Unlock FPS by disabling VSync
-application.target_fps = 0 # No internal frame limit
+window.vsync = False
+application.target_fps = 0
 
 env   = Environment3D()
 swarm = SwarmManager3D(env)
 W, H  = config.width, config.height
-D     = W                       # World depth (for 3D voxel grid and pathing)
+D     = W
 D     = env.depth
 
 # ── CAMERA ────────────────────────────────────────────────────────────────────
@@ -75,9 +75,9 @@ editor_cam.position = Vec3(W/2, 550, -750)
 editor_cam.rotation = (26, 0, 0)
 camera.clip_plane_far = 20000
 cinematic_mode = False
-CAM_PAN  = 220          # units / sec for arrow-key pan
-CAM_ZOOM = 600          # units / sec for zoom (= / - keys)
-CAM_SCROLL = 220        # units per scroll tick
+CAM_PAN  = 220
+CAM_ZOOM = 600
+CAM_SCROLL = 220
 
 # ── LIGHTING ──────────────────────────────────────────────────────────────────
 d_light = DirectionalLight(parent=scene, y=8, z=4, color=rgb(160, 185, 255))
@@ -106,12 +106,11 @@ for _gi in range(GRID_DIVS + 1):
     Entity(model=Mesh(vertices=[Vec3(0, 1.2, _v), Vec3(W, 1.2, _v)], mode='line', thickness=1),
            color=rgb(20, 60, 100, 120), unlit=True)
 
-# Massive invisible floor for reliable raycasting/interactivity
 floor_collider = Entity(model='plane', scale=(30000, 1, 30000),
                         position=(W/2, 0, W/2),
                         collider='box', visible=False)
 
-# ── BOUNDARY: floor + top squares + vertical pillars ─────────────────────────
+# ── BOUNDARY ─────────────────────────────────────────────────────────────────
 _cn = [(0,0,0),(W,0,0),(W,0,W),(0,0,W),
        (0,H,0),(W,H,0),(W,H,W),(0,H,W)]
 _bed = [(0,1),(1,2),(2,3),(3,0)]
@@ -162,7 +161,7 @@ waypoint_ring = Entity(parent=waypoint_marker, model='circle',
                        scale=3.5, rotation_x=90,
                        color=rgb(0, 255, 120, 90), unlit=True)
 
-# ── FORMATION CENTROID & GLOBAL CENTER (C2.2 / M2.5) ─────────────────────────
+# ── FORMATION CENTROID & GLOBAL CENTER ────────────────────────────────────────
 centroid_marker = Entity(model='diamond', scale=(30, 50, 30), color=rgb(255, 255, 255, 180), 
                          unlit=True, wireframe=True, enabled=False)
 
@@ -193,7 +192,6 @@ def _stamp_tile(cx, cz):
     z = cz * HMAP_CELL + HMAP_CELL/2
     hmap_verts.append(Vec3(x, 0, z))
     hmap_colors.append(rgb(0, 190, 255, 180))
-    
     if hmap_ent.enabled:
         hmap_ent.model.vertices = hmap_verts
         hmap_ent.model.colors = hmap_colors
@@ -216,12 +214,11 @@ optimized_neighbors = OptimizedNeighborLineRenderer(max_pairs=360)
 render_profiler = RenderProfiler()
 render_stats = RenderFrameStats()
     
-# ── M3 TASK MARKERS & ALLOCATOR PRISMS (C2.3) ────────────────────────────────
+# ── M3 TASK MARKERS & ALLOCATOR PRISMS ───────────────────────────────────────
 task_markers = []
 for t_idx, t_pos in enumerate(swarm.tasks):
     if t_idx in [4, 5]:
         continue
-    
     tm = Entity(position=(t_pos[0], t_pos[1], t_pos[2]), enabled=True)
     icon = Entity(parent=tm, model='diamond', scale=(30, 50, 30), color=rgb(0, 255, 255, 180), unlit=True)
     ring = Entity(parent=tm, model='circle', scale=25, rotation_x=90, color=rgb(150, 150, 150, 60), unlit=True)
@@ -245,7 +242,6 @@ info_text = Text(text='Initializing...', position=(-0.89, 0.45),
 if not hasattr(config, 'waypoint_weight'):
     config.waypoint_weight = 2.5
 
-# Initialize transport drone count
 if not hasattr(config, 'transport_drone_count'):
     config.transport_drone_count = 10
 
@@ -299,7 +295,7 @@ intent_indicator = Entity(model='diamond', scale=(35, 60, 35), color=rgb(0, 210,
 intent_glow = Entity(parent=intent_indicator, model='circle', scale=1.2, rotation_x=90,
                      color=rgb(0, 210, 255, 60), unlit=True)
 
-# ── FORCE BREAKDOWN HUD (C2.4) ───────────────────────────────────────────────
+# ── FORCE BREAKDOWN HUD ──────────────────────────────────────────────────────
 force_hud = Entity(parent=camera.ui, enabled=False)
 force_bg = Entity(parent=force_hud, model='quad', scale=(0.22, 0.25), position=(0.83, -0.45), color=rgb(8,12,22,30))
 force_border = Entity(parent=force_hud, model='quad', scale=(0.225, 0.255), position=(0.83, -0.45), color=rgb(0,180,255,8), z=1)
@@ -316,48 +312,68 @@ bar_aln = _make_bar(-0.46, 'Alignment', rgb(200, 200, 100))
 bar_coh = _make_bar(-0.51, 'Cohesion', rgb(100, 200, 100))
 bar_tsk = _make_bar(-0.56, 'Waypoint', rgb(100, 150, 200))
 
-# Mode bar (centre top)
 mode_bar_bg = Entity(parent=camera.ui, model='quad', scale=(0.6, 0.06), position=(0, 0.45), color=rgb(8, 12, 22, 140), enabled=False)
 mode_bar = Text(text='', origin=(0,0), position=(0, 0.45),
                 scale=1.0, color=rgb(255, 165, 30), background=False)
 
-# Volumetric Bounding Box
 volume_outline = Entity(model='cube', scale=(W, H, D), position=(W/2, H/2, D/2), 
                         color=rgb(0, 210, 255, 15), wireframe=True, unlit=True, enabled=True)
 
 scan_plane = Entity(model='quad', scale=(W, D), rotation_y=90, 
               color=rgb(0, 255, 255, 10), unlit=True, enabled=False)
 
-# ── MISSION FLEET HUD (C2.3 - Highlighting/Selection) ────────────────────────
-mission_hud_panel = Entity(parent=camera.ui, model='quad', scale=(0.30, 0.85),
-                           position=(0.74, -0.08), color=rgb(8, 12, 22, 200))
-Entity(parent=camera.ui, model='quad', scale=(0.305, 0.855),
-       position=(0.74, -0.08), color=rgb(0, 140, 255, 40), z=0.01)
+# ── MISSION FLEET HUD (FIXED SPACING) ────────────────────────────────────────
+mission_hud_panel = Entity(parent=camera.ui, model='quad', scale=(0.22, 0.88),
+                           position=(0.77, -0.06), color=rgb(8, 12, 22, 200))
+Entity(parent=camera.ui, model='quad', scale=(0.225, 0.885),
+       position=(0.77, -0.06), color=rgb(0, 140, 255, 40), z=0.01)
 
 # Panel title
-Text(parent=mission_hud_panel, text='FLEET COMMAND', position=(0, 0.46),
-     scale=1.4, color=rgb(0, 200, 255), origin=(0, 0))
-
-# Divider line under title
-Entity(parent=mission_hud_panel, model='quad', scale=(0.88, 0.005),
-       position=(0, 0.41), color=rgb(0, 160, 255, 180))
+Text(parent=mission_hud_panel, text='FLEET COMMAND', position=(0, 0.47),
+     scale=1.2, color=rgb(0, 200, 255), origin=(0, 0))
 
 # ── TRANSPORT DRONE COUNT DISPLAY ─────────────────────────────────────
-Text(parent=mission_hud_panel, text='TRANSPORT DRONES', position=(0, 0.36),
-     scale=1.0, color=rgb(200, 200, 200), origin=(0, 0))
+Entity(parent=mission_hud_panel, model='quad', scale=(0.9, 0.004),
+       position=(0, 0.43), color=rgb(0, 160, 255, 180))
+
+Text(parent=mission_hud_panel, text='TRANSPORT DRONES', position=(0, 0.40),
+     scale=0.8, color=rgb(200, 200, 200), origin=(0, 0))
 transport_count_label = Text(parent=mission_hud_panel, text=str(config.transport_drone_count),
-                              position=(0, 0.28), scale=2.5, color=color.orange, origin=(0, 0))
-Text(parent=mission_hud_panel, text='8 = fewer      9 = more', position=(0, 0.21),
-     scale=0.85, color=rgb(160, 160, 160), origin=(0, 0))
+                              position=(0, 0.34), scale=2.2, color=color.orange, origin=(0, 0))
+Text(parent=mission_hud_panel, text='[8] fewer    [9] more', position=(0, 0.28),
+     scale=0.7, color=rgb(160, 160, 160), origin=(0, 0))
 
-# Divider
-Entity(parent=mission_hud_panel, model='quad', scale=(0.88, 0.005),
-       position=(0, 0.16), color=rgb(0, 140, 255, 100))
+Entity(parent=mission_hud_panel, model='quad', scale=(0.9, 0.004),
+       position=(0, 0.24), color=rgb(0, 140, 255, 100))
 
+# ── MISSION BUTTONS ───────────────────────────────────────────────────
+Text(parent=mission_hud_panel, text='ASSIGN MISSION', position=(0, 0.20),
+     scale=0.8, color=rgb(180, 180, 180), origin=(0, 0))
+
+mission_btns = []
+mission_labels = ['Idle / Flocking', 'Object Transport', 'Area Coverage', 'Recall Fleet']
+btn_mission_map = [3, 7, 6, 5]
+
+for i, label in enumerate(mission_labels):
+    btn = Button(parent=mission_hud_panel, text=label, scale=(0.85, 0.07),
+                 position=(0, 0.14 - i * 0.09), color=rgb(60, 60, 60, 180),
+                 on_click=Func(select_mission, btn_mission_map[i]))
+    mission_btns.append(btn)
+
+Entity(parent=mission_hud_panel, model='quad', scale=(0.9, 0.004),
+       position=(0, -0.24), color=rgb(0, 140, 255, 100))
+
+# ── FAULT & RESET BUTTONS ─────────────────────────────────────────────
 fault_btn = Button(parent=mission_hud_panel, text='FAULT INJECTION',
-                   scale=(0.82, 0.075), position=(0, -0.33), color=rgb(120, 40, 40, 220))
+                   scale=(0.82, 0.06), position=(0, -0.30), color=rgb(120, 40, 40, 220))
 reset_btn = Button(parent=mission_hud_panel, text='RESET FLEET',
-                   scale=(0.82, 0.075), position=(0, -0.43), color=rgb(40, 110, 40, 220))
+                   scale=(0.82, 0.06), position=(0, -0.38), color=rgb(40, 110, 40, 220))
+
+Entity(parent=mission_hud_panel, model='quad', scale=(0.9, 0.004),
+       position=(0, -0.44), color=rgb(0, 140, 255, 100))
+
+coverage_text = Text(parent=mission_hud_panel, text='COVERAGE: 0.0%',
+                     position=(0, -0.47), scale=0.9, color=rgb(0, 210, 255), origin=(0, 0))
 
 def inject_fault():
     swarm.inject_faults(0.2)
@@ -378,13 +394,12 @@ def select_mission(m_id):
         highlighted_mission[0] = m_id
         alive = ~swarm.dead_mask
         
-        if m_id == 7:  # Object Transport - only assign subset of drones
+        if m_id == 7:
             alive_indices = np.where(alive)[0]
             num_to_assign = min(config.transport_drone_count, len(alive_indices))
             
             if num_to_assign > 0:
-                # Select drones closest to pickup point for efficiency
-                pickup_point = swarm.tasks[8]  # Pickup point
+                pickup_point = swarm.tasks[8]
                 distances = np.linalg.norm(
                     swarm.positions[alive_indices] - pickup_point, 
                     axis=1
@@ -392,52 +407,27 @@ def select_mission(m_id):
                 closest_indices = np.argsort(distances)[:num_to_assign]
                 selected_drones = alive_indices[closest_indices]
                 
-                # Create assignment mask
                 assign_mask = np.zeros(swarm.num_boids, dtype=bool)
                 assign_mask[selected_drones] = True
                 
-                # Assign transport mission to selected drones
                 swarm.mission_type[assign_mask] = m_id
                 swarm.assigned_tasks[assign_mask] = -1
                 swarm.transport_phase[assign_mask] = 0
                 swarm.delivered_mask[assign_mask] = False
                 
-                # Set remaining alive drones to idle
                 remaining = alive_indices[~np.isin(alive_indices, selected_drones)]
                 if len(remaining) > 0:
-                    swarm.mission_type[remaining] = 3  # Idle
+                    swarm.mission_type[remaining] = 3
                     swarm.assigned_tasks[remaining] = -1
                 
                 print(f"[M3] Transport Mission: {num_to_assign} drones assigned")
             else:
                 print("[M3] No drones available for transport")
         else:
-            # For all other missions, assign all alive drones
             swarm.mission_type[alive] = m_id
             swarm.assigned_tasks[alive] = -1
             
         print(f"[M3] Fleet Mission Updated: {m_id}")
-
-mission_btns = []
-mission_labels = ['Idle / Flocking', 'Object Transport', 'Area Coverage', 'Recall Fleet']
-btn_mission_map = [3, 7, 6, 5]
-
-# Label above buttons
-Text(parent=mission_hud_panel, text='ASSIGN MISSION', position=(0, 0.13),
-     scale=1.0, color=rgb(180, 180, 180), origin=(0, 0))
-
-for i, label in enumerate(mission_labels):
-    btn = Button(parent=mission_hud_panel, text=label, scale=(0.85, 0.095),
-                 position=(0, 0.06 - i * 0.12), color=rgb(60, 60, 60, 180),
-                 on_click=Func(select_mission, btn_mission_map[i]))
-    mission_btns.append(btn)
-
-# Divider above fault buttons
-Entity(parent=mission_hud_panel, model='quad', scale=(0.88, 0.005),
-       position=(0, -0.40), color=rgb(0, 140, 255, 100))
-
-coverage_text = Text(parent=mission_hud_panel, text='COVERAGE: 0.0%',
-                     position=(0, -0.47), scale=1.1, color=rgb(0, 210, 255), origin=(0, 0))
 
 # Mission Success Banner
 mission_banner = Entity(parent=camera.ui, model='quad', scale=(0.8, 0.15), 
@@ -445,8 +435,6 @@ mission_banner = Entity(parent=camera.ui, model='quad', scale=(0.8, 0.15),
 banner_text = Text(parent=mission_banner, text='AREA CLEARED | RECALL INITIATED', 
                    origin=(0,0), scale=2.5, color=color.white)
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  M3: BENCHMARK OVERLAY HUD
 # ═══════════════════════════════════════════════════════════════════════════════
 show_benchmark = False
 bench_panel = Entity(parent=camera.ui, enabled=False)
@@ -471,8 +459,6 @@ metrics_log = []
 log_timer = 0
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  M3: DECOUPLED ASYNCHRONOUS PHYSICS PIPELINE
-# ═══════════════════════════════════════════════════════════════════════════════
 import threading
 
 cinematic_mode_running = [False]
@@ -488,7 +474,6 @@ def _physics_worker():
         try:
             swarm.update()
             frames += 1
-
             curr_t = time.perf_counter()
             if curr_t - last_t >= 1.0:
                 _physics_tps[0] = frames / (curr_t - last_t)
@@ -510,7 +495,7 @@ physics_thread = threading.Thread(target=_physics_worker, daemon=True, name="Phy
 physics_thread.start()
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  UPDATE LOOP (RENDER ONLY)
+#  UPDATE LOOP
 # ═══════════════════════════════════════════════════════════════════════════════
 def update():
     _frame[0] += 1
@@ -540,7 +525,6 @@ def update():
     if held_keys['=']:   editor_cam.position += fwd * CAM_ZOOM * time.dt
     if held_keys['-']:   editor_cam.position -= fwd * CAM_ZOOM * time.dt
 
-    # Transport drone count adjustment (static vars to prevent rapid fire)
     if not hasattr(update, '_transport_last_press'):
         update._transport_last_press = 0
     
@@ -549,13 +533,11 @@ def update():
         config.transport_drone_count = max(1, config.transport_drone_count - 5)
         transport_count_label.text = str(config.transport_drone_count)
         update._transport_last_press = now
-        print(f"[TRANSPORT] Drone count: {config.transport_drone_count}")
         
     if held_keys['9'] and (now - update._transport_last_press) > 0.3:
         config.transport_drone_count = min(swarm.num_boids, config.transport_drone_count + 5)
         transport_count_label.text = str(config.transport_drone_count)
         update._transport_last_press = now
-        print(f"[TRANSPORT] Drone count: {config.transport_drone_count}")
     
     if waypoint_marker.enabled:
         waypoint_marker.rotation_y += 70 * time.dt
@@ -931,7 +913,6 @@ def update():
 
 
 def save_metrics_csv():
-    """M4: Final Evaluation Export + Parallel Analysis"""
     if not metrics_log: return
     filename = 'swarm_evaluation.csv'
     keys = metrics_log[0].keys()
@@ -953,19 +934,15 @@ def input(key):
     global show_benchmark
     global obs_ghost, obs_height, static_obs_ents, user_added, user_moving_obs, _initial_static_count
 
-    # ── TRANSPORT DRONE COUNT (check FIRST) ─────────────────────────
     if key == '9':
         config.transport_drone_count = min(swarm.num_boids, config.transport_drone_count + 5)
         transport_count_label.text = str(config.transport_drone_count)
-        print(f"[UI] Transport drones: {config.transport_drone_count}")
         return
         
     if key == '8':
         config.transport_drone_count = max(1, config.transport_drone_count - 5)
         transport_count_label.text = str(config.transport_drone_count)
-        print(f"[UI] Transport drones: {config.transport_drone_count}")
         return
-    # ────────────────────────────────────────────────────────────────
 
     if key in ('scroll up', 'scroll down'):
         try:
@@ -983,29 +960,20 @@ def input(key):
     if key == 'v':
         show_vectors = not show_vectors
         force_hud.enabled = show_vectors
-        print(f"[UI] Diagnostic Mode: {'ON' if show_vectors else 'OFF'}")
 
     if key == 'b':
         show_benchmark = not show_benchmark
         bench_panel.enabled = show_benchmark
-        print(f"[UI] Benchmark Overlay: {'ON' if show_benchmark else 'OFF'}")
 
     if   key == '1': swarm.set_method('naive')
     elif key == '2': swarm.set_method('octree')
-    
-    elif key == 'g':
-        show_centroid = not show_centroid
-        print(f"[UI] Global Center: {'ON' if show_centroid else 'OFF'}")
-
-    elif key == 'p':
-        save_metrics_csv()
-
+    elif key == 'g': show_centroid = not show_centroid
+    elif key == 'p': save_metrics_csv()
     elif key == 'l':
         show_neighbor_lines = not show_neighbor_lines
         nb_line_ent.enabled = show_neighbor_lines
         if not show_neighbor_lines:
             nb_line_ent.model.vertices = []; nb_line_ent.model.generate()
-
     elif key == 't':
         show_trails = not show_trails
         for i, e in enumerate(boid_entities):
@@ -1013,7 +981,6 @@ def input(key):
             if not show_trails:
                 e.trail.model.vertices = []; e.trail.model.generate()
                 trail_buffers[i].clear()
-
     elif key == 'h':
         show_heatmap = not show_heatmap
         hmap_ent.enabled = show_heatmap
@@ -1030,22 +997,16 @@ def input(key):
     if key == 'c':
         cinematic_mode = not cinematic_mode
         cinematic_mode_running[0] = cinematic_mode
-
     elif key == 'o':
         obs_mode = not obs_mode
         obs_ghost.enabled = False
-        if not obs_mode: 
-            obs_moving_mode = False
-        else:
-            print("[Obs Mode] Arrow Up/Down to adjust height, L-Click to place, R-Click to remove")
+        if not obs_mode: obs_moving_mode = False
 
     if obs_mode:
         if key == 'up arrow':
             obs_height[0] = min(obs_height[0] + 30, H - 20)
-            print(f"[Obs] Height: {int(obs_height[0])}")
         elif key == 'down arrow':
             obs_height[0] = max(obs_height[0] - 30, 20)
-            print(f"[Obs] Height: {int(obs_height[0])}")
         elif key == 'm':
             obs_moving_mode = not obs_moving_mode
             obs_ghost.color = (rgb(255, 200, 30, 170) if obs_moving_mode
@@ -1073,7 +1034,6 @@ def input(key):
                 })
                 obs_moving_mode = False
                 obs_ghost.color = rgb(255, 155, 30, 170)
-
         elif key == 'right mouse down' and user_added:
             rec = user_added.pop()
             destroy(rec['ent'])
@@ -1084,7 +1044,6 @@ def input(key):
             if rec['moving']:
                 user_moving_obs[:] = [m for m in user_moving_obs
                                       if m['ent'] is not rec['ent']]
-
     else:
         if key == 'left mouse down':
             if mouse.hovered_entity == floor_collider:
