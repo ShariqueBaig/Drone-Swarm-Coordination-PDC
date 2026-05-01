@@ -419,6 +419,7 @@ def main():
             local_mission = swarm.mission_type.copy()
             local_phase = swarm.transport_phase.copy()
             local_flashes = swarm.consensus_flashes.copy()
+            local_orientations = swarm.orientations.copy()
             pairs_i = swarm._last_pairs_i.copy()
             pairs_j = swarm._last_pairs_j.copy()
             target_pos = swarm.moving_target.copy()
@@ -514,8 +515,12 @@ def main():
             speed = np.linalg.norm(vel)
             if speed > 0.1:
                 nv = vel / speed
-                end_p = (int(p[0] + nv[0] * HEADING_LEN), int(p[1] + nv[1] * HEADING_LEN))
-                pygame.draw.line(screen, (200, 200, 200), p, end_p, 1)
+            else:
+                # Fallback to stored orientation when nearly stationary
+                angle = local_orientations[i]
+                nv = (math.cos(angle), math.sin(angle))
+            end_p = (int(p[0] + nv[0] * HEADING_LEN), int(p[1] + nv[1] * HEADING_LEN))
+            pygame.draw.line(screen, (200, 200, 200), p, end_p, 1)
 
         # HUD
         draw_hud_panel(screen, font, swarm, clock.get_fps(), physics_tps[0],

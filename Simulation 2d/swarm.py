@@ -37,6 +37,10 @@ class SwarmManager:
         self.velocities = np.ascontiguousarray(
             (np.random.rand(self.num_boids, 2) - 0.5) * config.max_speed
         )
+        # orientation (angle in radians) per drone — derived from velocity but stored
+        speeds_init = np.linalg.norm(self.velocities, axis=1)
+        self.orientations = np.arctan2(self.velocities[:, 1], self.velocities[:, 0])
+        self.orientations[~(speeds_init > 1e-6)] = 0.0
         self.accelerations = np.zeros((self.num_boids, 2))
         self.dead_mask = np.zeros(self.num_boids, dtype=bool)
 
@@ -1012,6 +1016,16 @@ class SwarmManager:
                 self.velocities[idx] = (
                     self.velocities[idx] / speeds[over, np.newaxis]
                 ) * config.max_speed
+
+            # Update stored orientations from velocities (preserve when near-zero speed)
+            try:
+                vel_alive = self.velocities[alive]
+                sp = np.linalg.norm(vel_alive, axis=1)
+                nz = sp > 1e-6
+                if np.any(nz):
+                    self.orientations[alive[nz]] = np.arctan2(vel_alive[nz, 1], vel_alive[nz, 0])
+            except Exception:
+                pass
 
             self.positions[alive] += self.velocities[alive] * config.dt
             # Clip X and Y only (2D)
