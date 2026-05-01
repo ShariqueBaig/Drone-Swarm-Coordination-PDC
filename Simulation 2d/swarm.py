@@ -72,6 +72,10 @@ class SwarmManager:
         self.tracking_error = 0.0
         self.tracking_error_ema = 0.0
 
+        self.consensus_flashes = np.zeros(self.num_boids, dtype=int)
+        self.moving_target = np.array([env.width * 0.5, env.height * 0.5])
+        self.moving_target_vel = np.array([30.0, 20.0])
+
         self.failed_mask = np.zeros(self.num_boids, dtype=bool)
         self.fault_injected = False
         self.frame_count = 0
@@ -445,8 +449,18 @@ class SwarmManager:
             diffs = targets[np.newaxis, :, :] - self.positions[m_idx, np.newaxis, :]
             dists = np.linalg.norm(diffs, axis=2)
             best = np.argmin(dists, axis=1)
-            self.assigned_tasks[m_idx] = t_start + best
-            self.bids[m_idx] = dists[np.arange(len(m_idx)), best]
+            closest_dists = dists[np.arange(len(m_idx)), best]
+
+            # DECENTRALIZATION DEMO: Only drones within sensor range (350px) can detect the task directly.
+            # Drones outside this range MUST learn about it via local consensus (message passing)!
+            can_sense = closest_dists < 350.0
+            if not np.any(can_sense) and len(m_idx) > 0:
+                # Ensure at least the single closest drone gets the task to seed the network
+                can_sense[np.argmin(closest_dists)] = True
+
+            lead_idx = m_idx[can_sense]
+            self.assigned_tasks[lead_idx] = t_start + best[can_sense]
+            self.bids[lead_idx] = closest_dists[can_sense]
 
     def apply_local_consensus(self, pairs):
         """Lightweight neighbor consensus: lower bid wins and neighbor adopts task."""
@@ -478,6 +492,7 @@ class SwarmManager:
 
         self.assigned_tasks[receiver] = self.assigned_tasks[donor]
         self.bids[receiver] = self.bids[donor]
+        self.consensus_flashes[receiver] = 15
         self.consensus_updates += int(len(receiver))
 
     def set_fleet_mission(self, mission_id):
@@ -680,6 +695,8 @@ class SwarmManager:
                         if stolen is not None:
                             tv = np.array(stolen)
                             self.reserved_grid[tv[0], tv[1]] = i
+                            # Flash to simulate receiving work coordinates via message passing
+                            self.consensus_flashes[i] = 15
                         else:
                             tv = np.array([gx, gy])
 
@@ -704,6 +721,23 @@ class SwarmManager:
             if np.any(far):
                 desired5[far] = diff5[far] * 0.4 + tangent[far] * config.max_speed * 0.7
             ts[idx5] = self._steer_toward(desired5, self.velocities[idx5])
+
+        # ── M4: Target Tracking ───────────────────────────────────────────────
+        m4 = (mt_eff == 4)
+        if np.any(m4):
+            idx4 = alive[m4]
+            diff4 = self.moving_target[np.newaxis, :] - self.positions[idx4]
+            ts[idx4] = self._steer_toward(diff4, self.velocities[idx4])
+            
+        # ── M8: Formation Traversal ───────────────────────────────────────────
+        m8 = (mt_eff == 8)
+        if np.any(m8):
+            idx8 = alive[m8]
+            target = self.tasks[9]
+            if getattr(self.env, "target_waypoint", None) is not None:
+                target = np.array(self.env.target_waypoint)
+            diff8 = target - self.positions[idx8]
+            ts[idx8] = self._steer_toward(diff8, self.velocities[idx8]) * 0.5
 
         # ── M7: Object Transport ──────────────────────────────────────────────
         m7 = (mt_eff == 7) & has_task
@@ -745,33 +779,49 @@ class SwarmManager:
     def calculate_formation_steer(self):
         fs = np.zeros_like(self.positions)
 
-        doing_formation = (~self.dead_mask) & (self.mission_type == 6)
-        if not np.any(doing_formation):
+        doing_formation = (~self.dead_mask) & ((self.mission_type == 6) | (self.mission_type == 8))
+        active_idx = np.where(doing_formation)[0]
+        n_active = len(active_idx)
+        if n_active == 0:
             return fs
 
-        center = np.mean(self.positions[doing_formation], axis=0)
-        avg_vel = np.mean(self.velocities[doing_formation], axis=0)
+        center = np.mean(self.positions[active_idx], axis=0)
+        avg_vel = np.mean(self.velocities[active_idx], axis=0)
         spd = np.linalg.norm(avg_vel)
+        
         if spd < 1.0:
-            return fs  # Don't form grid if barely moving
-
-        dir_vec = avg_vel / spd
+            dir_vec = np.array([1.0, 0.0])
+        else:
+            dir_vec = avg_vel / spd
+            
         # 2D perpendicular: [-dy, dx]
         side_vec = np.array([-dir_vec[1], dir_vec[0]])
         if np.linalg.norm(side_vec) < 1e-3:
-            side_vec = np.array([1.0, 0.0])  # Fallback
+            side_vec = np.array([0.0, 1.0])
         side_vec = side_vec / np.linalg.norm(side_vec)
 
-        row = np.arange(self.num_boids) % 10
-        col = np.arange(self.num_boids) // 10
+        # Dynamic grid size
+        grid_cols = int(np.ceil(np.sqrt(n_active)))
+        spacing = 40.0  # Slightly larger than safety_distance (25) to prevent separation fighting
+
+        # Array of indices for active drones
+        indices = np.arange(n_active)
+        r = indices // grid_cols
+        c = indices % grid_cols
+
+        # Center the grid perfectly around the center of mass
+        row_offset = (r - (grid_cols - 1) / 2.0) * spacing
+        col_offset = (c - (grid_cols - 1) / 2.0) * spacing
+
+        # Compute targets for active drones
         targets = (
             center[np.newaxis, :]
-            - dir_vec[np.newaxis, :] * (row[:, np.newaxis] * 60)
-            + side_vec[np.newaxis, :] * (col[:, np.newaxis] * 50 - 250)
+            - dir_vec[np.newaxis, :] * row_offset[:, np.newaxis]
+            + side_vec[np.newaxis, :] * col_offset[:, np.newaxis]
         )
 
-        full_steer = self.steer(targets - self.positions, subtract_vels=True)
-        fs[doing_formation] = full_steer[doing_formation]
+        full_steer = self.steer(targets - self.positions[active_idx], subtract_vels=self.velocities[active_idx])
+        fs[active_idx] = full_steer
         return fs
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -847,6 +897,12 @@ class SwarmManager:
 
         self.metrics.start_section("serial_overhead")
         self.env.step(config.dt)
+        self.moving_target += self.moving_target_vel * config.dt
+        if self.moving_target[0] < 0 or self.moving_target[0] > self.env.width:
+            self.moving_target_vel[0] *= -1
+        if self.moving_target[1] < 0 or self.moving_target[1] > self.env.height:
+            self.moving_target_vel[1] *= -1
+        self.consensus_flashes[self.consensus_flashes > 0] -= 1
         self.metrics.end_section("serial_overhead")
 
         # ── 2D Coverage Grid Update ────────────────────────────────────────

@@ -159,6 +159,10 @@ class Environment:
         self.user_obstacles.append((x, y, r))
         self._rebuild_obstacle_cache()
 
+    def add_dynamic_obstacle(self, x, y, r=30.0, vx=40.0, vy=30.0):
+        self.dynamic_obstacles.append(DynamicObstacle(x, y, r, vx, vy))
+        self._rebuild_obstacle_cache()
+
     def remove_obstacle_at(self, x, y):
         """Remove the nearest obstacle within its radius of (x, y)."""
         # Search User -> Static -> Dynamic

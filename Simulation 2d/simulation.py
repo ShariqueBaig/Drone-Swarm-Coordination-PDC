@@ -180,7 +180,8 @@ def draw_hud_panel(surface, font, swarm, fps, physics_tps, highlighted_mission, 
         "Controls:",
         "SPACE: Pause   R: Reset",
         "1: Naive  2: KDTree  3: Grid",
-        "F: Inject Faults",
+        "F: Inject Faults   N: Neighbors",
+        "O: Spawn Dyn Obs",
         "Shift+LClick: Place Obs",
         "Shift+RClick: Rem Obs",
         "LClick: Set Waypoint",
@@ -192,22 +193,25 @@ def draw_hud_panel(surface, font, swarm, fps, physics_tps, highlighted_mission, 
         surface.blit(txt, (20, 25 + i * 20))
 
     # Right Panel (Missions)
-    m_panel = pygame.Surface((220, 420), pygame.SRCALPHA)
+    m_panel = pygame.Surface((220, 460), pygame.SRCALPHA)
     m_panel.fill(C_PANEL)
     surface.blit(m_panel, (surface.get_width() - 230, 10))
 
     txt = font.render("FLEET COMMAND", True, (150, 150, 150))
     surface.blit(txt, (surface.get_width() - 220, 25))
 
-    mission_labels = ['Idle / Flocking', 'Object Transport', 'Area Coverage', 'Recall Fleet']
-    btn_mission_map = [3, 7, 6, 5]
+    mission_labels = ['Idle / Flocking', 'Object Transport', 'Area Coverage', 'Target Tracking', 'Formation Traversal', 'Recall Fleet']
+    btn_mission_map = [3, 7, 6, 4, 8, 5]
 
     for i, label in enumerate(mission_labels):
         m_type = btn_mission_map[i]
         color = C_BTN_ON if highlighted_mission == m_type else C_BTN_OFF
 
-        rect = pygame.Rect(surface.get_width() - 215, 60 + i * 60, 190, 45)
-        btns[i] = (rect, m_type)
+        rect = pygame.Rect(surface.get_width() - 215, 60 + i * 50, 190, 40)
+        if i < len(btns):
+            btns[i] = (rect, m_type)
+        else:
+            btns.append((rect, m_type))
 
         btn_surf = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
         btn_surf.fill(color)
@@ -220,7 +224,7 @@ def draw_hud_panel(surface, font, swarm, fps, physics_tps, highlighted_mission, 
 
     # Coverage bar at bottom of mission panel
     cov_txt = font.render(f"COVERAGE: {cov:.1f}%", True, (150, 150, 150))
-    surface.blit(cov_txt, (surface.get_width() - 220, 400))
+    surface.blit(cov_txt, (surface.get_width() - 220, 430))
 
 
 def main():
@@ -239,14 +243,15 @@ def main():
     cam = Camera2D(env.width, env.height, SW, SH)
 
     highlighted_mission = 3  # Idle by default
-    btns = [(None, -1)] * 4
+    btns = [(None, -1)] * 6
     
     # Slider for team size (1-100)
-    team_slider = Slider(SW - 215, 360, 190, 20, 1, 100, swarm.transport_team_size, "Team Size")
+    team_slider = Slider(SW - 215, 390, 190, 20, 1, 100, swarm.transport_team_size, "Team Size")
 
     paused = False
     physics_tps = [0.0]
     show_coverage = True
+    show_neighbors = False
     waypoint_marker = None
 
     # ── Physics Thread (Decoupled) ────────────────────────────────────────────
@@ -304,6 +309,12 @@ def main():
                 elif event.key == pygame.K_f:
                     swarm.inject_faults(0.2)
                     print("[SIM] Fault injected: 20%")
+                elif event.key == pygame.K_n:
+                    show_neighbors = not show_neighbors
+                    print(f"[SIM] Show Neighbors: {show_neighbors}")
+                elif event.key == pygame.K_o:
+                    env.add_dynamic_obstacle(env.width/2, env.height/2, 30.0, np.random.uniform(-80, 80), np.random.uniform(-80, 80))
+                    print("[SIM] Spawned dynamic obstacle")
                 elif event.key == pygame.K_h:
                     show_coverage = not show_coverage
             elif event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
@@ -407,6 +418,10 @@ def main():
             local_assigned = swarm.assigned_tasks.copy()
             local_mission = swarm.mission_type.copy()
             local_phase = swarm.transport_phase.copy()
+            local_flashes = swarm.consensus_flashes.copy()
+            pairs_i = swarm._last_pairs_i.copy()
+            pairs_j = swarm._last_pairs_j.copy()
+            target_pos = swarm.moving_target.copy()
 
         # Task Markers (show only active)
         assigned_count = np.zeros(len(local_tasks))
@@ -454,6 +469,16 @@ def main():
                 r = cam.wl(15)
                 pygame.draw.rect(screen, C_CARGO, (p[0] - r, p[1] - r, r * 2, r * 2), 1)
 
+        if np.any(local_mission == 4):
+            # Target Tracking mission target
+            tp = cam.ws(target_pos)
+            pygame.draw.circle(screen, (255, 0, 0), tp, cam.wl(15), 2)
+            pygame.draw.circle(screen, (255, 100, 100), tp, 5)
+
+        if show_neighbors and len(pairs_i) > 0:
+            for pi, pj in zip(pairs_i, pairs_j):
+                pygame.draw.line(screen, (0, 80, 100), cam.ws(local_pos[pi]), cam.ws(local_pos[pj]), 1)
+
         # Drones
         for i in range(swarm.num_boids):
             pos = local_pos[i]
@@ -480,6 +505,9 @@ def main():
 
             radius = 5 if is_sel else 4
             pygame.draw.circle(screen, color, p, radius)
+
+            if local_flashes[i] > 0:
+                pygame.draw.circle(screen, (255, 255, 0), p, radius + 4, 1)
 
             # Heading line
             vel = local_vel[i]
