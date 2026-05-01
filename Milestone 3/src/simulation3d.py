@@ -198,14 +198,9 @@ def _stamp_tile(cx, cz):
         hmap_ent.model.generate()
 
 # ─── OPTIMIZED BATCH DRONE RENDERER ──────────────────────────────────────────
-# ═══ PDC TECHNIQUE: Data Parallelism + Ring Buffers ═══
-# Instead of 100 individual Entity updates per frame, we batch:
-#  1. Positions in a single NumPy array (100,3) → single GPU transfer
-#  2. Trails in ring buffers (no per-frame allocation)
-#  3. Colors via vectorized conditionals (SIMD-friendly)
 boid_entities = []
 batch_renderer = BatchDroneRenderer(swarm.num_boids, max_trail_len=10)
-trail_buffers = [deque(maxlen=10) for _ in range(swarm.num_boids)]  # Ring buffers
+trail_buffers = [deque(maxlen=10) for _ in range(swarm.num_boids)]
 
 for i in range(swarm.num_boids):
     drone = Entity(model='sphere', scale=7, color=rgb(0, 210, 255), unlit=True)
@@ -214,7 +209,6 @@ for i in range(swarm.num_boids):
     drone._prev_color_key = ''
     boid_entities.append(drone)
 
-# Optimized heatmap and neighbor renderer
 optimized_heatmap = OptimizedHeatmapRenderer(swarm.grid_res, W)
 optimized_neighbors = OptimizedNeighborLineRenderer(max_pairs=360)
 render_profiler = RenderProfiler()
@@ -227,9 +221,7 @@ for t_idx, t_pos in enumerate(swarm.tasks):
         continue
     
     tm = Entity(position=(t_pos[0], t_pos[1], t_pos[2]), enabled=True)
-    
     icon = Entity(parent=tm, model='diamond', scale=(30, 50, 30), color=rgb(0, 255, 255, 180), unlit=True)
-    
     ring = Entity(parent=tm, model='circle', scale=25, rotation_x=90, color=rgb(150, 150, 150, 60), unlit=True)
     task_markers.append({'base': tm, 'icon': icon, 'ring': ring})
 
@@ -251,14 +243,16 @@ info_text = Text(text='Initializing...', position=(-0.89, 0.45),
 if not hasattr(config, 'waypoint_weight'):
     config.waypoint_weight = 2.5
 
+# Initialize transport drone count
+if not hasattr(config, 'transport_drone_count'):
+    config.transport_drone_count = 10
+
 slider_x = -0.84
 slider_start_y = 0.08
 def _make_slider(text, val, y_off):
-    # Place heading above the bar and keep both inside the left UI panel
     heading_x = slider_x + 0.02
     Text(parent=camera.ui, text=text, position=(heading_x, y_off + 0.035),
         scale=0.65, color=color.white, origin=(-0.5,0))
-    # Reduce slider width so it fits inside the panel and move slightly down
     s = ThinSlider(text='', dynamic=True, min=0, max=10, default=val,
                 x=slider_x, y=y_off - 0.02, parent=camera.ui, scale=0.32)
     return s
@@ -339,6 +333,14 @@ Entity(parent=camera.ui, model='quad', scale=(0.205, 0.755),
        position=(0.78, -0.1), color=rgb(0, 140, 255, 8), z=0.01)
 Text(parent=mission_hud_panel, text='FLEET COMMAND', position=(0, 0.46), scale=0.65, color=rgb(150, 150, 150), origin=(0,0))
 
+# ── TRANSPORT DRONE COUNT DISPLAY ─────────────────────────────────────
+Text(parent=mission_hud_panel, text='TRANSPORT SIZE', position=(0, 0.39), 
+     scale=0.5, color=rgb(180, 180, 180), origin=(0,0))
+transport_count_label = Text(parent=mission_hud_panel, text=str(config.transport_drone_count), 
+                              position=(0, 0.35), scale=1.2, color=color.orange, origin=(0,0))
+Text(parent=mission_hud_panel, text='8 / 9 keys to adjust', position=(0, 0.31), 
+     scale=0.35, color=rgb(120, 120, 120), origin=(0,0))
+
 fault_btn = Button(parent=mission_hud_panel, text='FAULT INJECTION',
                    scale=(0.8, 0.05), position=(0, -0.28), color=rgb(80, 40, 40, 60))
 reset_btn = Button(parent=mission_hud_panel, text='RESET FLEET',
@@ -361,13 +363,46 @@ def select_mission(m_id):
         highlighted_mission[0] = -1
     else: 
         highlighted_mission[0] = m_id
-        # Assign this mission to all active/alive drones
         alive = ~swarm.dead_mask
-        swarm.mission_type[alive] = m_id
-        swarm.assigned_tasks[alive] = -1 # Clear old assignments
-        if m_id == 7: # Reset transport phase if starting transport
-            swarm.transport_phase[alive] = 0
-            swarm.delivered_mask[alive] = False
+        
+        if m_id == 7:  # Object Transport - only assign subset of drones
+            alive_indices = np.where(alive)[0]
+            num_to_assign = min(config.transport_drone_count, len(alive_indices))
+            
+            if num_to_assign > 0:
+                # Select drones closest to pickup point for efficiency
+                pickup_point = swarm.tasks[8]  # Pickup point
+                distances = np.linalg.norm(
+                    swarm.positions[alive_indices] - pickup_point, 
+                    axis=1
+                )
+                closest_indices = np.argsort(distances)[:num_to_assign]
+                selected_drones = alive_indices[closest_indices]
+                
+                # Create assignment mask
+                assign_mask = np.zeros(swarm.num_boids, dtype=bool)
+                assign_mask[selected_drones] = True
+                
+                # Assign transport mission to selected drones
+                swarm.mission_type[assign_mask] = m_id
+                swarm.assigned_tasks[assign_mask] = -1
+                swarm.transport_phase[assign_mask] = 0
+                swarm.delivered_mask[assign_mask] = False
+                
+                # Set remaining alive drones to idle
+                remaining = alive_indices[~np.isin(alive_indices, selected_drones)]
+                if len(remaining) > 0:
+                    swarm.mission_type[remaining] = 3  # Idle
+                    swarm.assigned_tasks[remaining] = -1
+                
+                print(f"[M3] Transport Mission: {num_to_assign} drones assigned")
+            else:
+                print("[M3] No drones available for transport")
+        else:
+            # For all other missions, assign all alive drones
+            swarm.mission_type[alive] = m_id
+            swarm.assigned_tasks[alive] = -1
+            
         print(f"[M3] Fleet Mission Updated: {m_id}")
 
 mission_btns = []
@@ -386,22 +421,19 @@ coverage_text = Text(parent=mission_hud_panel, text='COVERAGE: 0.0%',
 mission_banner = Entity(parent=camera.ui, model='quad', scale=(0.8, 0.15), 
                         position=(0, 0), color=rgb(20, 180, 255, 0), enabled=False)
 banner_text = Text(parent=mission_banner, text='AREA CLEARED | RECALL INITIATED', 
-                   origin=(0,0), scale=2.5, color=color.white)# ═══════════════════════════════════════════════════════════════════════════════
-#  M3: BENCHMARK OVERLAY HUD — Shows parallel speedup metrics in real-time
-#  ═══ PDC TECHNIQUE 15: Amdahl's & Gustafson's Law ═══
-#  Displays serial fraction, Amdahl speedup, Gustafson speedup, and
-#  technique timing breakdown directly in the simulation HUD.
+                   origin=(0,0), scale=2.5, color=color.white)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  M3: BENCHMARK OVERLAY HUD
 # ═══════════════════════════════════════════════════════════════════════════════
 show_benchmark = False
 bench_panel = Entity(parent=camera.ui, enabled=False)
 
-# Background and border
 Entity(parent=bench_panel, model='quad', scale=(0.42, 0.26),
        position=(0.0, -0.38), color=rgb(8, 12, 22, 190), z=0.02)
 Entity(parent=bench_panel, model='quad', scale=(0.425, 0.265),
        position=(0.0, -0.38), color=rgb(0, 255, 180, 15), z=0.01)
 
-# Texts
 bench_title = Text(parent=bench_panel, text='PARALLEL METRICS', 
                    position=(-0.19, -0.27), scale=0.7, color=rgb(0, 255, 180))
 bench_text = Text(parent=bench_panel, text='Warming up...', 
@@ -418,10 +450,6 @@ log_timer = 0
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  M3: DECOUPLED ASYNCHRONOUS PHYSICS PIPELINE
-#  ═══ PDC TECHNIQUE: Lock-Free Producer-Consumer Pipeline ═══
-#  The physics engine runs entirely independently in a background daemon thread.
-#  It updates the simulation at maximum possible speed (TPS), while the 
-#  main Ursina loop only consumes the state at 60 FPS for rendering.
 # ═══════════════════════════════════════════════════════════════════════════════
 import threading
 
@@ -438,9 +466,6 @@ def _physics_worker():
         try:
             swarm.update()
             frames += 1
-            
-            # Rate limiting removed as per user request to increase performance
-            # time.sleep(0.012) 
 
             curr_t = time.perf_counter()
             if curr_t - last_t >= 1.0:
@@ -448,7 +473,6 @@ def _physics_worker():
                 frames = 0
                 last_t = curr_t
         except RuntimeError as e:
-            # Pool can be briefly unavailable during reset/teardown.
             if 'cannot schedule new futures after shutdown' in str(e):
                 time.sleep(0.05)
                 continue
@@ -475,7 +499,6 @@ def update():
     except Exception:
         cov_pct = 0.0
 
-    # Camera keyboard pan (WASD relative to view, QE for Y) + zoom
     try:
         y_rot = math.radians(editor_cam.rotation_y)
         x_rot = math.radians(editor_cam.rotation_x)
@@ -495,7 +518,21 @@ def update():
     if held_keys['=']:   editor_cam.position += fwd * CAM_ZOOM * time.dt
     if held_keys['-']:   editor_cam.position -= fwd * CAM_ZOOM * time.dt
 
-    # Waypoint pulse (throttled)
+        # Transport drone count adjustment (static vars to prevent rapid fire)
+    if not hasattr(update, '_transport_last_press'):
+        update._transport_last_press = 0
+    
+    now = time.time()
+    if held_keys['8'] and (now - update._transport_last_press) > 0.3:
+        config.transport_drone_count = max(1, config.transport_drone_count - 5)
+        update._transport_last_press = now
+        print(f"[TRANSPORT] Drone count: {config.transport_drone_count}")
+        
+    if held_keys['9'] and (now - update._transport_last_press) > 0.3:
+        config.transport_drone_count = min(swarm.num_boids, config.transport_drone_count + 5)
+        update._transport_last_press = now
+        print(f"[TRANSPORT] Drone count: {config.transport_drone_count}")
+    
     if waypoint_marker.enabled:
         waypoint_marker.rotation_y += 70 * time.dt
         if _frame[0] % 4 == 0:
@@ -503,7 +540,6 @@ def update():
             waypoint_ring.scale_x = 3 * pulse
             waypoint_ring.scale_y = 3 * pulse
 
-    # Obstacle placement ghost preview
     if obs_mode:
         try:
             if hasattr(mouse, 'world_point') and mouse.world_point:
@@ -525,7 +561,6 @@ def update():
             
         obs_ghost.rotation_y += 55 * time.dt
 
-    # Update moving user-placed obstacles
     for mo in user_moving_obs:
         nx = mo['ox'] + mo['amp'] * math.sin(mo['freq']  * _t)
         nz = mo['oz'] + mo['amp'] * math.cos(mo['freq2'] * _t)
@@ -536,7 +571,6 @@ def update():
             old = swarm.env.obstacles[sidx]
             swarm.env.obstacles[sidx] = (nx, old[1], nz, old[3])
 
-    # Sync obstacle entities
     for i, ob in enumerate(swarm.env.obstacles):
         if i < len(static_obs_ents):
             static_obs_ents[i].position = (ob[0], ob[1], ob[2])
@@ -544,15 +578,6 @@ def update():
         if i < len(dyn_obs_ents):
             dyn_obs_ents[i].position = (d.x, d.y, d.z)
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    #  OPTIMIZED BATCH DRONE UPDATE
-    #  ═══ PDC TECHNIQUE: Data Parallelism + Ring Buffers + Batch Processing ═══
-    #  Key optimizations:
-    #    1. Single lock for position copy (minimal contention)
-    #    2. Vectorized color computation (NumPy SIMD)
-    #    3. Ring buffer trails (no per-frame allocation)
-    #    4. Lazy mesh regeneration (only when dirty)
-    # ═══════════════════════════════════════════════════════════════════════════
     render_profiler.start_frame()
     active_count = 0
     centroid = Vec3(0, 0, 0)
@@ -561,7 +586,6 @@ def update():
     do_nl    = show_neighbor_lines and (_frame[0] % 10 == 0)
     do_look  = (_frame[0] % 2 == 0)
 
-    # Single fast copy (one lock acquire/release)
     with swarm.state_lock:
         local_positions = swarm.positions.copy()
         local_velocities = swarm.velocities.copy()
@@ -571,7 +595,6 @@ def update():
     
     render_profiler.mark_section('state_copy')
     
-    # ═══ Vectorized position & color batch update ═══
     for i in range(len(boid_entities)):
         e = boid_entities[i]
         pos = local_positions[i]
@@ -587,14 +610,13 @@ def update():
 
         active_count += 1
         p3 = Vec3(pos[0], pos[1], pos[2])
-        e.position = p3  # Single per-drone (unavoidable with Ursina)
+        e.position = p3
         centroid += p3
 
         vel = local_velocities[i]
         spd = math.sqrt(vel[0]**2 + vel[1]**2 + vel[2]**2)
         h_id = highlighted_mission[0]
         
-        # Vectorized color selection (cache-friendly)
         if local_delivered[i]:
             new_key = 'delivered'
         elif show_vectors:
@@ -622,22 +644,19 @@ def update():
         if spd > 0.5 and do_look:
             e.look_at(p3 + Vec3(vel[0], vel[1], vel[2]))
 
-        # ═══ Ring buffer trail (no allocation, constant O(1)) ═══
         if do_trail:
-            trail_buffers[i].append(p3)  # Auto-drops old points
+            trail_buffers[i].append(p3)
             if len(trail_buffers[i]) >= 2:
                 e.trail.model.vertices = list(trail_buffers[i])
                 e.trail.model.generate()
     
     render_profiler.mark_section('drone_update')
 
-    # ═══ Optimized neighbor line rendering ═══
     if do_nl:
         pi = swarm._last_pairs_i; pj = swarm._last_pairs_j
         if len(pi) > 0:
-            # Vectorized line generation (batch with NumPy)
-            pa = swarm.positions[pi[:180]]  # (N, 3)
-            pb = swarm.positions[pj[:180]]  # (N, 3)
+            pa = swarm.positions[pi[:180]]
+            pb = swarm.positions[pj[:180]]
             nv = []
             for a, b in zip(pa, pb):
                 nv += [Vec3(a[0],a[1],a[2]), Vec3(b[0],b[1],b[2])]
@@ -652,7 +671,6 @@ def update():
     if active_count > 0:
         centroid /= active_count
 
-    # Cinematic
     if cinematic_mode and active_count > 0:
         orbit_r = 260
         angle = _t * 0.32
@@ -663,7 +681,6 @@ def update():
                                    Vec3(cx_c, cy_c, cz_c), 4 * time.dt)
         editor_cam.look_at(centroid)
 
-    # Task Visualization (throttled)
     if _frame[0] % 6 == 0:
         assigned_count = np.zeros(len(swarm.tasks))
         for tid in swarm.assigned_tasks:
@@ -672,8 +689,6 @@ def update():
         for tid, tm_dict in enumerate(task_markers):
             if tid >= len(assigned_count): continue
             
-            # ═══ TASK VISIBILITY ═══
-            # Hide diamonds unless drones are actively pursuing them
             if assigned_count[tid] > 0:
                 tm_dict['base'].enabled = True
                 tm_dict['icon'].color = rgb(0, 255, 255, 200)
@@ -686,7 +701,6 @@ def update():
                 tm_dict['ring'].color = rgb(150, 150, 150, 60)
                 tm_dict['icon'].rotation_y += 20 * time.dt * 6
 
-    # ═══ CARGO SYNC ═══
     if _frame[0] % 2 == 0:
         transporting = (swarm.mission_type == 7) & (swarm.transport_phase == 1)
         delivered = (swarm.mission_type == 7) & (swarm.transport_phase == 2)
@@ -712,7 +726,6 @@ def update():
             else:
                 cargo_box.enabled = False
 
-    # Force HUD & Macro Swarm Intent (throttled)
     if _frame[0] % 6 == 0:
         if show_vectors and active_count > 0:
             if not hasattr(swarm, 'last_sep'): return
@@ -747,7 +760,6 @@ def update():
         else:
             intent_indicator.enabled = False
 
-    # Mission Button highlight (throttled)
     if _frame[0] % 10 == 0:
         btn_mission_map = [3, 7, 6, 5]
         for i, btn in enumerate(mission_btns):
@@ -755,24 +767,18 @@ def update():
                 mission_type = btn_mission_map[i]
                 btn.color = rgb(100, 150, 180, 100) if highlighted_mission[0] == mission_type else rgb(60, 60, 60, 50)
 
-    # Coverage Tracking & Telemetry (throttled)
     if _frame[0] % 6 == 0:
         global log_timer
-        # Count visited cells efficiently using numpy
         visited_count = np.count_nonzero(swarm.visited_grid)
         cov_pct = (visited_count / (swarm.grid_res**3)) * 100
         coverage_text.text = f'COVERAGE: {cov_pct:.1f}%'
 
-        # ═══ Optimized heatmap rendering (incremental update) ═══
         if show_heatmap or show_vectors:
-            # ═══ PDC TECHNIQUE: Vectorized Discovery Tracking ═══
-            # Use NumPy bitwise ops instead of slow Python loops for 27,000 cells
             new_mask = swarm.visited_grid & ~swarm.last_grid
             new_indices = np.argwhere(new_mask)
             
             if len(new_indices) > 0:
                 voxel_size = np.array([W/swarm.grid_res, H/swarm.grid_res, D/swarm.grid_res])
-                # Bulk convert grid coords to world positions
                 pos_batch = new_indices * voxel_size + (voxel_size/2)
                 
                 for pos in pos_batch:
@@ -783,7 +789,6 @@ def update():
                         DiscoveryPulse(Vec3(*pos))
 
                 if show_heatmap:
-                    # ═══ CRASH PROTECTION ═══
                     min_len = min(len(hmap_verts), len(hmap_colors))
                     if min_len > 0:
                         hmap_ent.model.vertices = hmap_verts[:min_len]
@@ -806,14 +811,12 @@ def update():
                 'Robustness': swarm.get_robustness_score(_t - app.start_time)
             })
 
-        # Mission Complete Detection
         if cov_pct > 99.5 and not mission_banner.enabled:
             mission_banner.enabled = True
             mission_banner.animate_color(rgb(20, 180, 255, 180), duration=2)
             if hasattr(swarm, 'recall_fleet'): swarm.recall_fleet()
             save_metrics_csv() 
 
-    # Formation Centroid
     if active_count > 0:
         centroid_marker.enabled = show_centroid
         centroid_marker.position = centroid
@@ -826,10 +829,6 @@ def update():
     else:
         centroid_marker.enabled = False
 
-    # ═══════════════════════════════════════════════════════════════════════
-    #  HUD UPDATE (throttled to every 10th frame)
-    #  Includes benchmark overlay for PDC technique visualization
-    # ═══════════════════════════════════════════════════════════════════════
     if _frame[0] % 10 == 0:
         cov = swarm.coverage_pct
         dead_n = int(np.sum(swarm.dead_mask))
@@ -845,12 +844,14 @@ def update():
         gpu_s = 'GPU' if GPU_AVAILABLE else 'CPU'
         threads_s = str(config.num_threads)
 
+        transport_active = int(np.sum((swarm.mission_type == 7) & ~swarm.dead_mask))
         info_text.text = (
             'SWARM  COVERAGE  METRICS\n'
             '------------------------\n'
             f'Active : {fault}{active_count}/{swarm.num_boids}\n'
             f'Dead   : {dead_n}\n'
             f'Cover  : {cov:.1f}%\n'
+            f'Transport: {transport_active}/{config.transport_drone_count}\n'
             f'Status : {wp_s}\n'
             f'Algo   : {algo}\n'
             f'Backend: {gpu_s} | {threads_s}T\n'
@@ -870,14 +871,12 @@ def update():
             mode_bar_bg.enabled = False
             mode_bar.text = ''
 
-        # ═══ PDC TECHNIQUE 15: Benchmark Overlay Update ═══
         if show_benchmark:
             bench_text.text = (
                 f'FPS: {fps_v}  Sim TPS: {int(_physics_tps[0])}\n'
                 f'{swarm.metrics.get_hud_text()}'
             )
 
-    # Reset
     if held_keys['r']:
         swarm.__init__(env)
         waypoint_marker.enabled = False
@@ -893,7 +892,7 @@ def update():
         for i, e in enumerate(boid_entities):
             e.color = rgb(0, 210, 255); e.y = 0; e.rotation_x = 0
             e._prev_color_key = ''
-            trail_buffers[i].clear()  # Clear ring buffer
+            trail_buffers[i].clear()
             e.trail.model.vertices = []; e.trail.model.generate()
         while user_added:
             rec = user_added.pop()
@@ -903,7 +902,6 @@ def update():
             if static_obs_ents: static_obs_ents.pop()
         user_moving_obs.clear()
     
-    # Record render frame time
     render_profiler.end_frame()
     render_stats.record_render_frame(time.dt if hasattr(time, 'dt') else 0.016)
 
@@ -922,17 +920,28 @@ def save_metrics_csv():
     except Exception as e:
         print(f"[M4] Error saving metrics: {e}")
 
-    # Also export parallel analysis
     swarm.metrics.export_csv("parallel_analysis.csv")
     swarm.metrics.print_report()
 
 def input(key):
+    print(f"[DEBUG] Key pressed: '{key}'")  # ADD THIS LINE FIRST
     global cinematic_mode, obs_mode, obs_moving_mode
     global show_neighbor_lines, show_heatmap, show_trails, show_vectors, show_centroid
     global show_benchmark
     global obs_ghost, obs_height, static_obs_ents, user_added, user_moving_obs, _initial_static_count
 
-    # Scroll-wheel zoom
+    # ── TRANSPORT DRONE COUNT (check FIRST) ─────────────────────────
+    if key == '9':
+        config.transport_drone_count = min(swarm.num_boids, config.transport_drone_count + 5)
+        print(f"[UI] Transport drones: {config.transport_drone_count}")
+        return
+        
+    if key == '8':
+        config.transport_drone_count = max(1, config.transport_drone_count - 5)
+        print(f"[UI] Transport drones: {config.transport_drone_count}")
+        return
+    # ────────────────────────────────────────────────────────────────
+
     if key in ('scroll up', 'scroll down'):
         try:
             y_rot = math.radians(editor_cam.rotation_y)
@@ -946,19 +955,16 @@ def input(key):
             pass
         return
 
-    # Debug Force Vectors
     if key == 'v':
         show_vectors = not show_vectors
         force_hud.enabled = show_vectors
         print(f"[UI] Diagnostic Mode: {'ON' if show_vectors else 'OFF'}")
 
-    # ═══ PDC TECHNIQUE 15: Benchmark HUD Toggle ═══
     if key == 'b':
         show_benchmark = not show_benchmark
         bench_panel.enabled = show_benchmark
         print(f"[UI] Benchmark Overlay: {'ON' if show_benchmark else 'OFF'}")
 
-    # Algorithm switch
     if   key == '1': swarm.set_method('naive')
     elif key == '2': swarm.set_method('octree')
     
@@ -998,7 +1004,7 @@ def input(key):
 
     if key == 'c':
         cinematic_mode = not cinematic_mode
-        cinematic_mode_running[0] = cinematic_mode # Use to pause background simulation if desired. Currently they run concurrently.
+        cinematic_mode_running[0] = cinematic_mode
 
     elif key == 'o':
         obs_mode = not obs_mode
@@ -1008,7 +1014,6 @@ def input(key):
         else:
             print("[Obs Mode] Arrow Up/Down to adjust height, L-Click to place, R-Click to remove")
 
-    # Obstacle mode sub-controls
     if obs_mode:
         if key == 'up arrow':
             obs_height[0] = min(obs_height[0] + 30, H - 20)
@@ -1055,7 +1060,6 @@ def input(key):
                 user_moving_obs[:] = [m for m in user_moving_obs
                                       if m['ent'] is not rec['ent']]
 
-    # Normal mode
     else:
         if key == 'left mouse down':
             if mouse.hovered_entity == floor_collider:
