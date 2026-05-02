@@ -15,13 +15,14 @@ KEYS:
   C              Cinematic camera
   R              Reset simulation
   B              Toggle benchmark overlay (parallel speedup HUD)
-  P              Export metrics CSV + parallel analysis
+  P              Toggle Fleet Command task panel
   V              Toggle diagnostics
   G              Toggle global center marker
   Arrow keys     Pan camera: Left/Right = X   Up/Down = Z (forward/back)
   Page Up/Down   Pan camera: Y (vertical)
   Left-Click     Set waypoint (normal mode)
   Right-Click    Clear waypoint (normal mode)
+
 
 ═══ PDC TECHNIQUES IN VISUALIZATION LAYER ═══
   - Data Parallelism: Batch entity position updates via NumPy slicing
@@ -48,12 +49,7 @@ app.start_time = time.time()
 app.setBackgroundColor(rgb(4, 6, 13))
 
 # Discovery Pulse Effect (M2.7 - High Performance)
-class DiscoveryPulse(Entity):
-    def __init__(self, pos):
-        super().__init__(model='sphere', scale=15, position=pos, color=rgb(0, 250, 255, 140), unlit=True)
-        self.animate_scale(45, duration=0.7, curve=curve.out_expo)
-        self.animate_color(rgb(0, 250, 255, 0), duration=0.7, curve=curve.out_expo)
-        destroy(self, delay=0.8)
+# Disabled to avoid "spawning out of nowhere" effect
 
 window.fps_counter.enabled = False
 window.entity_counter.enabled = False
@@ -71,13 +67,19 @@ D     = env.depth
 
 # ── CAMERA ────────────────────────────────────────────────────────────────────
 editor_cam = EditorCamera()
-editor_cam.position = Vec3(W/2, 550, -750)
-editor_cam.rotation = (26, 0, 0)
+# Position camera to view the complete simulation cube from a natural middle perspective
+editor_cam.position = Vec3(W/2, H * 1.5, -D * 2.2)
+editor_cam.rotation = (25, 0, 0)
+editor_cam.target = Vec3(W/2, H/2, D/2)
+editor_cam.pan_speed = Vec2(-5, -5) # Fix inverted pan
 camera.clip_plane_far = 20000
 cinematic_mode = False
-CAM_PAN  = 220
-CAM_ZOOM = 600
-CAM_SCROLL = 220
+show_mission_hud = True
+_saved_cam_z = [0]
+CAM_PAN  = 800
+CAM_ZOOM = 1200
+CAM_SCROLL = 400
+cam_velocity = Vec3(0, 0, 0)
 
 # ── LIGHTING ──────────────────────────────────────────────────────────────────
 d_light = DirectionalLight(parent=scene, y=8, z=4, color=rgb(160, 185, 255))
@@ -85,26 +87,19 @@ d_light.look_at(Vec3(0, -1, 0.4))
 AmbientLight(parent=scene, color=rgb(18, 22, 38))
 
 # ── SKYBOX ────────────────────────────────────────────────────────────────────
-Entity(model='sphere', scale=15000, color=rgb(4, 6, 13),
+sky_sphere = Entity(model='sphere', scale=15000, color=rgb(4, 6, 13),
        double_sided=True, unlit=True)
 random.seed(77)
 _sv = [Vec3(random.uniform(-6000,6000), random.uniform(80,4500),
             random.uniform(-6000,6000)) for _ in range(100)]
-Entity(model=Mesh(vertices=_sv, mode='point', thickness=3),
+star_field = Entity(model=Mesh(vertices=_sv, mode='point', thickness=3),
        color=rgb(195, 215, 255), unlit=True)
 
 # ── FLOOR ─────────────────────────────────────────────────────────────────────
-Entity(model='plane', scale=(W, 1, W), position=(W/2, 0, W/2),
-       color=rgb(9, 14, 23), unlit=True)
+floor_plane = Entity(model='plane', scale=(W, 1, W), position=(W/2, 0, W/2),
+       color=rgb(15, 28, 48), unlit=True)
 
-GRID_DIVS = 8
-_gs = W / GRID_DIVS
-for _gi in range(GRID_DIVS + 1):
-    _v = _gi * _gs
-    Entity(model=Mesh(vertices=[Vec3(_v, 1.2, 0), Vec3(_v, 1.2, W)], mode='line', thickness=1),
-           color=rgb(20, 60, 100, 120), unlit=True)
-    Entity(model=Mesh(vertices=[Vec3(0, 1.2, _v), Vec3(W, 1.2, _v)], mode='line', thickness=1),
-           color=rgb(20, 60, 100, 120), unlit=True)
+
 
 floor_collider = Entity(model='plane', scale=(30000, 1, 30000),
                         position=(W/2, 0, W/2),
@@ -171,7 +166,7 @@ nb_line_ent = Entity(model=Mesh(vertices=[], mode='line', thickness=1),
                      color=rgb(0, 190, 255, 70), unlit=True, enabled=False)
 
 # ── TRAILS ────────────────────────────────────────────────────────────────────
-show_trails = True
+show_trails = False
 show_centroid = False
 
 # ── HEATMAP ───────────────────────────────────────────────────────────────────
@@ -216,28 +211,35 @@ render_stats = RenderFrameStats()
     
 # ── M3 TASK MARKERS & ALLOCATOR PRISMS ───────────────────────────────────────
 task_markers = []
-for t_idx, t_pos in enumerate(swarm.tasks):
-    if t_idx in [4, 5]:
-        continue
-    tm = Entity(position=(t_pos[0], t_pos[1], t_pos[2]), enabled=True)
-    icon = Entity(parent=tm, model='diamond', scale=(30, 50, 30), color=rgb(0, 255, 255, 180), unlit=True)
-    ring = Entity(parent=tm, model='circle', scale=25, rotation_x=90, color=rgb(150, 150, 150, 60), unlit=True)
-    task_markers.append({'base': tm, 'icon': icon, 'ring': ring})
+# Prisms disabled as heatmaps suffice for area coverage
 
-# ── CARGO OBJECT (M3 Task) ──────────────────────────────────────────────────
-cargo_box = Entity(model='cube', scale=40, color=rgb(255, 165, 30, 200),
+
+# ── CARGO OBJECT & MARKERS (M3 Task) ─────────────────────────────────────────
+cargo_box = Entity(model='cube', scale=40, color=rgb(255, 165, 30, 180),
                    unlit=True, wireframe=True, enabled=False)
-cargo_glow = Entity(parent=cargo_box, model='sphere', scale=1.5, 
-                    color=rgb(255, 165, 30, 40), unlit=True)
+
+cargo_core = Entity(parent=cargo_box, model='diamond', scale=0.6, 
+                    color=rgb(255, 200, 100, 220), unlit=True)
+cargo_ring1 = Entity(parent=cargo_box, model='circle', scale=1.3, rotation_x=45,
+                     color=rgb(255, 165, 30, 150), unlit=True)
+cargo_ring2 = Entity(parent=cargo_box, model='circle', scale=1.3, rotation_z=45, rotation_y=90,
+                     color=rgb(255, 165, 30, 150), unlit=True)
+
+dropoff_pad = Entity(model='cylinder', scale=(70, 20, 70), color=rgb(30, 255, 120, 80),
+                     unlit=True, enabled=False)
+dropoff_ring = Entity(parent=dropoff_pad, model='circle', scale=1.1, rotation_x=90, 
+                      y=0.55, color=rgb(30, 255, 120, 200), unlit=True)
+dropoff_beam = Entity(parent=dropoff_pad, model='cylinder', scale=(0.8, 10, 0.8), y=5, 
+                      color=rgb(30, 255, 120, 30), unlit=True)
 
 # ── HUD ───────────────────────────────────────────────────────────────────────
-ui_panel = Entity(parent=camera.ui, model='quad', scale=(0.38, 0.95),
-                  position=(-0.72, 0.0), color=rgb(8, 12, 22, 60))
-Entity(parent=camera.ui, model='quad', scale=(0.385, 0.955),
-       position=(-0.72, 0.0), color=rgb(0, 140, 255, 10), z=1)
+ui_panel = Entity(parent=camera.ui, model='quad', scale=(0.3, 0.94),
+                  position=(-0.75, 0.0), color=rgb(8, 12, 22, 180))
+ui_panel_bg = Entity(parent=camera.ui, model='quad', scale=(0.305, 0.945),
+       position=(-0.75, 0.0), color=rgb(0, 140, 255, 15), z=1)
 
-info_text = Text(text='Initializing...', position=(-0.89, 0.45),
-                 scale=0.65, color=rgb(180, 180, 180), background=False)
+info_text = Text(text='Initializing...', position=(-0.88, 0.44),
+                 scale=0.75, color=color.white, background=False)
 
 if not hasattr(config, 'waypoint_weight'):
     config.waypoint_weight = 2.5
@@ -245,14 +247,15 @@ if not hasattr(config, 'waypoint_weight'):
 if not hasattr(config, 'transport_drone_count'):
     config.transport_drone_count = 10
 
-slider_x = -0.84
+slider_x = -0.85
 slider_start_y = 0.08
 def _make_slider(text, val, y_off):
     heading_x = slider_x + 0.02
-    Text(parent=camera.ui, text=text, position=(heading_x, y_off + 0.035),
+    txt = Text(parent=camera.ui, text=text, position=(heading_x, y_off + 0.035),
         scale=0.65, color=color.white, origin=(-0.5,0))
     s = ThinSlider(text='', dynamic=True, min=0, max=10, default=val,
                 x=slider_x, y=y_off - 0.02, parent=camera.ui, scale=0.32)
+    s.text_entity = txt
     return s
 
 separation_slider = _make_slider('Separation', config.separation_weight, slider_start_y)
@@ -272,21 +275,17 @@ cohesion_slider.on_value_changed = update_weights
 waypoint_slider.on_value_changed = update_weights
 
 controls_text = Text(
-    text='CONTROLS\n'
-         '1/2   : Algo      L : Lines\n'
-         'T : Trails        H : Map\n'
-         'O : Obs Mode      R : Reset\n'
-         'C : Cinematic     G : Center\n'
-         'W/A/S/D : Pan XZ  Q/E : Pan Y\n'
-         '= : Zoom In       - : Zoom Out\n'
-         'Scroll Wheel : Zoom (fast)\n'
-         'L-Click Floor: Set Waypoint\n'
-         'R-Click: Clear Waypoint\n'
-         'P : Export CSV    V : Diagnostics\n'
-         'B : Benchmark HUD (Parallel)\n'
-         '[Obs] Up/Down: Height  M: Move\n'
-         '[Obs] L-Click: Place   R-Click: Undo',
-    position=(-0.89, -0.21), scale=0.65, color=color.azure
+    text='<cyan>KEY COMMANDS\n'
+         '<gray>1/2  : Algo Switch\n'
+         'L/T/H: Debug Toggles\n'
+         'C/P/B: View Toggles\n'
+         'O    : Obstacle Mode\n'
+         'R    : Reset Swarm\n'
+         'V/G  : Diagnostic View\n'
+         'WASD : Camera Pan\n'
+         'QE   : Elevation\n'
+         'Scroll: Move Forward',
+    position=(-0.86, -0.22), scale=0.6, color=color.azure
 )
 
 show_vectors = False
@@ -316,59 +315,71 @@ mode_bar_bg = Entity(parent=camera.ui, model='quad', scale=(0.6, 0.06), position
 mode_bar = Text(text='', origin=(0,0), position=(0, 0.45),
                 scale=1.0, color=rgb(255, 165, 30), background=False)
 
-volume_outline = Entity(model='cube', scale=(W, H, D), position=(W/2, H/2, D/2), 
-                        color=rgb(0, 210, 255, 15), wireframe=True, unlit=True, enabled=True)
+boundary_faces = Entity(model='cube', scale=(-W, H, D), position=(W/2, H/2, D/2),
+                        color=rgb(15, 28, 48, 160), unlit=True, enabled=True)
 
 scan_plane = Entity(model='quad', scale=(W, D), rotation_y=90, 
               color=rgb(0, 255, 255, 10), unlit=True, enabled=False)
 
 # ── MISSION FLEET HUD (FIXED SPACING) ────────────────────────────────────────
 mission_hud_panel = Entity(parent=camera.ui, model='quad', scale=(0.22, 0.88),
-                           position=(0.77, -0.06), color=rgb(8, 12, 22, 200))
-Entity(parent=camera.ui, model='quad', scale=(0.225, 0.885),
-       position=(0.77, -0.06), color=rgb(0, 140, 255, 40), z=0.01)
+                           position=(0.72, 0.0), color=rgb(8, 12, 22, 200))
+mission_hud_border = Entity(parent=camera.ui, model='quad', scale=(0.225, 0.885),
+       position=(0.72, 0.0), color=rgb(0, 140, 255, 40), z=0.01)
 
-# Panel title
-Text(parent=mission_hud_panel, text='FLEET COMMAND', position=(0, 0.47),
-     scale=1.2, color=rgb(0, 200, 255), origin=(0, 0))
+# Panel Content (Centered Mission Selection)
+# No Header Text (Requested Removal)
 
-# ── TRANSPORT DRONE COUNT DISPLAY ─────────────────────────────────────
-Entity(parent=mission_hud_panel, model='quad', scale=(0.9, 0.004),
-       position=(0, 0.43), color=rgb(0, 160, 255, 180))
 
-Text(parent=mission_hud_panel, text='TRANSPORT DRONES', position=(0, 0.40),
-     scale=0.8, color=rgb(200, 200, 200), origin=(0, 0))
-transport_count_label = Text(parent=mission_hud_panel, text=str(config.transport_drone_count),
-                              position=(0, 0.34), scale=2.2, color=color.orange, origin=(0, 0))
-Text(parent=mission_hud_panel, text='[8] fewer    [9] more', position=(0, 0.28),
-     scale=0.7, color=rgb(160, 160, 160), origin=(0, 0))
-
-Entity(parent=mission_hud_panel, model='quad', scale=(0.9, 0.004),
-       position=(0, 0.24), color=rgb(0, 140, 255, 100))
-
-Entity(parent=mission_hud_panel, model='quad', scale=(0.9, 0.004),
-       position=(0, -0.24), color=rgb(0, 140, 255, 100))
-
-# ── FAULT & RESET BUTTONS ─────────────────────────────────────────────
-fault_btn = Button(parent=mission_hud_panel, text='FAULT INJECTION',
-                   scale=(0.82, 0.06), position=(0, -0.30), color=rgb(120, 40, 40, 220))
+# Fault & Reset (Centered Context)
+fault_btn = Button(parent=mission_hud_panel, text='INJECT FAULT',
+                   scale=(0.82, 0.06), position=(0, -0.26), color=rgb(80, 45, 45, 160))
 reset_btn = Button(parent=mission_hud_panel, text='RESET FLEET',
-                   scale=(0.82, 0.06), position=(0, -0.38), color=rgb(40, 110, 40, 220))
-
-Entity(parent=mission_hud_panel, model='quad', scale=(0.9, 0.004),
-       position=(0, -0.44), color=rgb(0, 140, 255, 100))
-
-coverage_text = Text(parent=mission_hud_panel, text='COVERAGE: 0.0%',
-                     position=(0, -0.47), scale=0.9, color=rgb(0, 210, 255), origin=(0, 0))
+                   scale=(0.82, 0.06), position=(0, -0.34), color=rgb(45, 70, 50, 160))
 
 def inject_fault():
     swarm.inject_faults(0.2)
     print("[M3] Chaos Injected: 20% Drones failing!")
 fault_btn.on_click = inject_fault
 
+def perform_full_reset():
+    global log_timer, cinematic_mode
+    swarm.__init__(env)
+    waypoint_marker.enabled = False
+    swarm.env.target_waypoint = None
+    hmap_verts.clear(); hmap_colors.clear()
+    hmap_ent.model.vertices = []; hmap_ent.model.generate()
+    
+    metrics_log.clear()
+    log_timer = 0
+    mission_banner.enabled = False
+    mission_banner.has_shown = False
+    banner_text.color = color.rgba(255,255,255,0)
+    banner_subtext.color = color.rgba(0, 255, 255, 0)
+    highlighted_mission[0] = -1
+    cinematic_mode = False
+    
+    if hasattr(cargo_box, 'initialized'):
+        del cargo_box.initialized
+
+    for i, e in enumerate(boid_entities):
+        e.color = rgb(0, 210, 255); e.y = 0; e.rotation_x = 0
+        e._prev_color_key = ''
+        trail_buffers[i].clear()
+        e.trail.model.vertices = []; e.trail.model.generate()
+        
+    while user_added:
+        rec = user_added.pop()
+        destroy(rec['ent'])
+        if len(swarm.env.obstacles) > _initial_static_count:
+            swarm.env.obstacles.pop()
+        if static_obs_ents: static_obs_ents.pop()
+    user_moving_obs.clear()
+    print("[M3] Simulation Reset: Fleet and Tasks Ready.")
+
 def reset_fleet():
-    swarm.reset_faults()
-    print("[M3] Fleet Restored.")
+    perform_full_reset()
+
 reset_btn.on_click = reset_fleet
 
 highlighted_mission = [-1] 
@@ -382,7 +393,7 @@ def select_mission(m_id):
         
         if m_id == 7:
             alive_indices = np.where(alive)[0]
-            num_to_assign = min(config.transport_drone_count, len(alive_indices))
+            num_to_assign = min(4, len(alive_indices))
             
             if num_to_assign > 0:
                 pickup_point = swarm.tasks[8]
@@ -415,25 +426,68 @@ def select_mission(m_id):
             
         print(f"[M3] Fleet Mission Updated: {m_id}")
 
-# ── MISSION BUTTONS ───────────────────────────────────────────────────
-Text(parent=mission_hud_panel, text='ASSIGN MISSION', position=(0, 0.20),
-     scale=0.8, color=rgb(180, 180, 180), origin=(0, 0))
-
+# ── MISSION BUTTONS (Centered Y) ─────────────────────────────────────────────
 mission_btns = []
 mission_labels = ['Idle / Flocking', 'Object Transport', 'Area Coverage', 'Recall Fleet']
 btn_mission_map = [3, 7, 6, 5]
 
 for i, label in enumerate(mission_labels):
     btn = Button(parent=mission_hud_panel, text=label, scale=(0.85, 0.07),
-                 position=(0, 0.14 - i * 0.09), color=rgb(60, 60, 60, 180),
+                 position=(0, 0.12 - i * 0.09), color=rgb(60, 60, 60, 180),
                  on_click=Func(select_mission, btn_mission_map[i]))
     mission_btns.append(btn)
 
 # Mission Success Banner
-mission_banner = Entity(parent=camera.ui, model='quad', scale=(0.8, 0.15), 
-                        position=(0, 0), color=rgb(20, 180, 255, 0), enabled=False)
-banner_text = Text(parent=mission_banner, text='AREA CLEARED | RECALL INITIATED', 
-                   origin=(0,0), scale=2.5, color=color.white)
+# ── MISSION SUCCESS BANNER (Premium Redesign) ─────────────────────────────────
+mission_banner = Entity(parent=camera.ui, enabled=False, z=-10)
+mission_banner.has_shown = False
+
+banner_bg = Entity(parent=mission_banner, model='quad', scale=(0.8, 0.15), 
+                   position=(0, 0.35), color=rgb(8, 12, 22, 0))
+banner_line_t = Entity(parent=mission_banner, model='quad', scale=(0, 0.004), 
+                       position=(0, 0.425), color=rgb(0, 255, 255, 0))
+banner_line_b = Entity(parent=mission_banner, model='quad', scale=(0, 0.004), 
+                       position=(0, 0.275), color=rgb(0, 255, 255, 0))
+banner_text = Text(parent=mission_banner, text='MISSION ACCOMPLISHED', 
+                   origin=(0,0), position=(0, 0.36), scale=3, color=color.rgba(255,255,255,0))
+banner_subtext = Text(parent=mission_banner, text='AREA 100% COVERED • RECALL PROTOCOL ACTIVE', 
+                      origin=(0,0), position=(0, 0.31), scale=1.2, color=color.rgba(0, 255, 255, 0))
+
+# ── CINEMATIC HUD (M3 Extension) ─────────────────────────────────────────────
+cinematic_hud = Entity(parent=camera.ui, enabled=False)
+cine_bar = Entity(parent=cinematic_hud, model='quad', scale=(1.0, 0.05), 
+                  position=(0, -0.465), color=rgb(8, 12, 22, 180))
+cine_line = Entity(parent=cinematic_hud, model='quad', scale=(1.0, 0.003),
+                   position=(0, -0.44), color=rgb(0, 210, 255, 120))
+cine_stats = Text(parent=cinematic_hud, text='', position=(0, -0.468), 
+                  scale=0.85, color=color.white, origin=(0, 0))
+
+def hide_banner():
+    if not mission_banner.enabled: return
+    banner_bg.animate_color(rgb(8, 12, 22, 0), duration=1)
+    banner_line_t.animate_scale((0, 0.004), duration=1)
+    banner_line_b.animate_scale((0, 0.004), duration=1)
+    banner_text.animate_color(color.rgba(255,255,255,0), duration=1)
+    banner_subtext.animate_color(color.rgba(0, 255, 255, 0), duration=1)
+    invoke(setattr, mission_banner, 'enabled', False, delay=1.1)
+
+def show_banner():
+    if getattr(mission_banner, 'has_shown', False): return
+    global cinematic_mode
+    mission_banner.enabled = True
+    mission_banner.has_shown = True
+    cinematic_mode = True 
+    highlighted_mission[0] = 5 
+    
+    banner_bg.animate_color(rgb(8, 12, 22, 220), duration=0.6)
+    banner_line_t.animate_scale((0.8, 0.004), duration=0.8, curve=curve.out_expo)
+    banner_line_b.animate_scale((0.8, 0.004), duration=0.8, curve=curve.out_expo)
+    banner_line_t.animate_color(rgb(0, 255, 255, 255), duration=0.6)
+    banner_line_b.animate_color(rgb(0, 255, 255, 255), duration=0.6)
+    banner_text.animate_color(color.white, duration=0.8)
+    banner_subtext.animate_color(rgb(0, 255, 255), duration=0.8)
+    
+    invoke(hide_banner, delay=5)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 show_benchmark = False
@@ -468,9 +522,6 @@ def _physics_worker():
     last_t = time.perf_counter()
     frames = 0
     while True:
-        if cinematic_mode_running[0]:
-            time.sleep(0.01)
-            continue
         try:
             swarm.update()
             frames += 1
@@ -516,14 +567,24 @@ def update():
     except:
         fwd, right = Vec3(0,0,1), Vec3(1,0,0)
 
-    if held_keys['a']:   editor_cam.position -= right * CAM_PAN * time.dt
-    if held_keys['d']:   editor_cam.position += right * CAM_PAN * time.dt
-    if held_keys['w']:   editor_cam.position += fwd * CAM_PAN * time.dt
-    if held_keys['s']:   editor_cam.position -= fwd * CAM_PAN * time.dt
-    if held_keys['e']:   editor_cam.position += Vec3(0, CAM_PAN * time.dt, 0)
-    if held_keys['q']:   editor_cam.position -= Vec3(0, CAM_PAN * time.dt, 0)
-    if held_keys['=']:   editor_cam.position += fwd * CAM_ZOOM * time.dt
-    if held_keys['-']:   editor_cam.position -= fwd * CAM_ZOOM * time.dt
+    global cam_velocity
+    desired_vel = Vec3(0, 0, 0)
+
+    if not cinematic_mode:
+        if held_keys['a']:   desired_vel -= right * CAM_PAN
+        if held_keys['d']:   desired_vel += right * CAM_PAN
+        if held_keys['w']:   desired_vel += fwd * CAM_PAN
+        if held_keys['s']:   desired_vel -= fwd * CAM_PAN
+        if held_keys['e']:   desired_vel += Vec3(0, CAM_PAN, 0)
+        if held_keys['q']:   desired_vel -= Vec3(0, CAM_PAN, 0)
+        if held_keys['=']:   desired_vel += fwd * CAM_ZOOM
+        if held_keys['-']:   desired_vel -= fwd * CAM_ZOOM
+
+        # Smooth, natural acceleration and deceleration
+        cam_velocity = lerp(cam_velocity, desired_vel, time.dt * 10)
+        editor_cam.position += cam_velocity * time.dt
+    else:
+        cam_velocity = Vec3(0, 0, 0)
 
     if not hasattr(update, '_transport_last_press'):
         update._transport_last_press = 0
@@ -531,20 +592,17 @@ def update():
     now = time.time()
     if held_keys['8'] and (now - update._transport_last_press) > 0.3:
         config.transport_drone_count = max(1, config.transport_drone_count - 5)
-        transport_count_label.text = str(config.transport_drone_count)
         update._transport_last_press = now
         
     if held_keys['9'] and (now - update._transport_last_press) > 0.3:
         config.transport_drone_count = min(swarm.num_boids, config.transport_drone_count + 5)
-        transport_count_label.text = str(config.transport_drone_count)
         update._transport_last_press = now
     
     if waypoint_marker.enabled:
         waypoint_marker.rotation_y += 70 * time.dt
         if _frame[0] % 4 == 0:
-            pulse = 1.0 + 0.38 * math.sin(_t * 5)
-            waypoint_ring.scale_x = 3 * pulse
-            waypoint_ring.scale_y = 3 * pulse
+            waypoint_ring.scale_x = 3
+            waypoint_ring.scale_y = 3
 
     if obs_mode:
         try:
@@ -596,6 +654,7 @@ def update():
         local_positions = swarm.positions.copy()
         local_velocities = swarm.velocities.copy()
         local_dead = swarm.dead_mask.copy()
+        local_failed = swarm.failed_mask.copy()
         local_missions = swarm.mission_type.copy()
         local_delivered = swarm.delivered_mask.copy()
     
@@ -605,8 +664,9 @@ def update():
         e = boid_entities[i]
         pos = local_positions[i]
         is_dead = local_dead[i]
+        is_failed = local_failed[i]
 
-        if is_dead:
+        if is_dead or is_failed:
             if e._prev_color_key != 'dead':
                 e.color = rgb(255, 30, 30)
                 e._prev_color_key = 'dead'
@@ -623,12 +683,20 @@ def update():
         spd = math.sqrt(vel[0]**2 + vel[1]**2 + vel[2]**2)
         h_id = highlighted_mission[0]
         
-        if local_delivered[i]:
-            new_key = 'delivered'
+        if local_missions[i] == 7:
+            phase = swarm.transport_phase[i]
+            if phase == 0:
+                new_key = 'transport_goto'
+            elif phase == 1:
+                new_key = 'transport_carry'
+            else:
+                new_key = 'delivered'
         elif show_vectors:
             new_key = 'vec'
         elif h_id != -1 and local_missions[i] == h_id:
             new_key = 'sel'
+        elif h_id == 7:
+            new_key = 'norm'
         elif h_id != -1:
             new_key = 'dim'
         else:
@@ -637,6 +705,10 @@ def update():
         if e._prev_color_key != new_key:
             if new_key == 'delivered':
                 e.color = rgb(30, 255, 120); e.scale = 9; e.unlit = True
+            elif new_key == 'transport_goto':
+                e.color = rgb(255, 165, 30); e.scale = 9; e.unlit = True
+            elif new_key == 'transport_carry':
+                e.color = rgb(255, 50, 50); e.scale = 10; e.unlit = True
             elif new_key == 'vec':
                 e.color = rgb(0, 210, 255); e.scale = 7; e.unlit = False
             elif new_key == 'sel':
@@ -678,14 +750,78 @@ def update():
         centroid /= active_count
 
     if cinematic_mode and active_count > 0:
-        orbit_r = 260
-        angle = _t * 0.32
-        cx_c = centroid.x + orbit_r * math.sin(angle)
-        cy_c = centroid.y + 100
-        cz_c = centroid.z + orbit_r * math.cos(angle)
-        editor_cam.position = lerp(editor_cam.position,
-                                   Vec3(cx_c, cy_c, cz_c), 4 * time.dt)
-        editor_cam.look_at(centroid)
+        cube_center = Vec3(W/2, H/2, D/2)
+        dt = max(time.dt, 0.0001)  # Guard against zero dt
+        
+        # ── First frame: detach camera and neutralize EditorCamera ──
+        if camera.parent == editor_cam:
+            _saved_cam_z[0] = camera.z
+            # Snapshot world transform before reparenting
+            wp = Vec3(camera.world_position)
+            camera.world_parent = scene
+            camera.position = wp
+            
+            # Neutralize EditorCamera by replacing its update/input with no-ops
+            # (cannot use .enabled=False as that also disables child camera entity)
+            if not hasattr(editor_cam, '_orig_update'):
+                editor_cam._orig_update = editor_cam.update
+                editor_cam._orig_input = editor_cam.input
+            editor_cam.update = lambda: None
+            editor_cam.input = lambda key: None
+            
+            # Initialize orbit state from current position
+            offset = wp - cube_center
+            camera._cine_angle = math.atan2(offset.x, offset.z)
+            camera._cine_radius = max(math.sqrt(offset.x**2 + offset.z**2), 100)
+            camera._cine_y = wp.y
+            camera._cine_fov = camera.fov
+            camera._cine_time = 0.0
+
+        camera._cine_time += dt
+        
+        # ── Orbit parameters converge toward targets ──
+        target_radius = math.sqrt(W**2 + H**2 + D**2) * 1.05
+        target_y = cube_center.y + 600
+        
+        # Exponential convergence (frame-rate independent)
+        camera._cine_radius += (target_radius - camera._cine_radius) * (1.0 - math.exp(-1.2 * dt))
+        camera._cine_y      += (target_y - camera._cine_y)           * (1.0 - math.exp(-1.0 * dt))
+        
+        # Steady orbit rotation
+        camera._cine_angle += 0.12 * dt
+        
+        # ── Set position directly — no intermediate blending ──
+        cam_x = cube_center.x + camera._cine_radius * math.sin(camera._cine_angle)
+        cam_z = cube_center.z + camera._cine_radius * math.cos(camera._cine_angle)
+        cam_y = camera._cine_y
+        camera.position = Vec3(cam_x, cam_y, cam_z)
+        
+        # ── Set rotation directly — compute exact yaw/pitch to look at cube_center ──
+        dx = cube_center.x - cam_x
+        dy = cube_center.y - cam_y
+        dz = cube_center.z - cam_z
+        dist_xz = math.sqrt(dx*dx + dz*dz)
+        
+        camera.rotation_y = math.degrees(math.atan2(dx, dz))
+        camera.rotation_x = math.degrees(math.atan2(-dy, dist_xz)) if dist_xz > 0.01 else 0
+        camera.rotation_z = 0
+        
+        # ── FOV converge ──
+        camera._cine_fov += (65 - camera._cine_fov) * (1.0 - math.exp(-2.0 * dt))
+        camera.fov = camera._cine_fov
+    else:
+        # Restore EditorCamera methods and re-attach
+        if camera.parent != editor_cam:
+            if hasattr(editor_cam, '_orig_update'):
+                editor_cam.update = editor_cam._orig_update
+                editor_cam.input = editor_cam._orig_input
+            camera.parent = editor_cam
+            camera.position = (0, 0, _saved_cam_z[0])
+            camera.rotation = (0, 0, 0)
+            
+        # Gracefully return FOV to standard when exiting cinematic mode
+        if camera.fov > 40.5:
+            camera.fov = lerp(camera.fov, 40, 2.5 * time.dt)
 
     if _frame[0] % 6 == 0:
         assigned_count = np.zeros(len(swarm.tasks))
@@ -699,7 +835,7 @@ def update():
                 tm_dict['base'].enabled = True
                 tm_dict['icon'].color = rgb(0, 255, 255, 200)
                 tm_dict['icon'].rotation_y += 100 * time.dt * 6
-                tm_dict['icon'].scale = Vec3(30, 50, 30) * (1.1 + 0.1 * math.sin(_t*5))
+                tm_dict['icon'].scale = Vec3(30, 50, 30) # No pulsing for stable visuals
                 tm_dict['ring'].color = rgb(255, 200, 0, 150)
             else:
                 tm_dict['base'].enabled = False
@@ -707,30 +843,88 @@ def update():
                 tm_dict['ring'].color = rgb(150, 150, 150, 60)
                 tm_dict['icon'].rotation_y += 20 * time.dt * 6
 
-    if _frame[0] % 2 == 0:
-        transporting = (swarm.mission_type == 7) & (swarm.transport_phase == 1)
-        delivered = (swarm.mission_type == 7) & (swarm.transport_phase == 2)
+    transporting = (swarm.mission_type == 7) & (swarm.transport_phase == 1)
+    delivered = (swarm.mission_type == 7) & (swarm.transport_phase == 2)
+    preparing = (swarm.mission_type == 7) & (swarm.transport_phase == 0)
+    
+    if np.any(delivered):
+        cargo_box.enabled = True
+        dropoff_pad.enabled = True
+        dropoff = swarm.tasks[9]
+        dropoff_pad.position = Vec3(dropoff[0], dropoff[1] - 40, dropoff[2])
         
-        if np.any(transporting):
-            cargo_box.enabled = True
-            c_pos = np.mean(swarm.positions[transporting], axis=0)
-            cargo_box.position = Vec3(c_pos[0], c_pos[1], c_pos[2])
-            cargo_box.rotation_y += 45 * time.dt
-        elif np.any(delivered):
-            cargo_box.enabled = True
-            dropoff = swarm.tasks[9]
-            cargo_box.position = Vec3(dropoff[0], dropoff[1], dropoff[2])
-            cargo_box.color = rgb(30, 255, 120, 200)
-            cargo_glow.color = rgb(30, 255, 120, 40)
+        timer_vals = swarm.mission_timer[delivered]
+        ratio = max(0, timer_vals[0] / 5.0) if len(timer_vals) > 0 else 0
+        
+        c_pos = np.mean(swarm.positions[delivered], axis=0)
+        target_vec = Vec3(c_pos[0], c_pos[1], c_pos[2])
+        if not hasattr(cargo_box, 'initialized'):
+            cargo_box.position = target_vec
+            cargo_box.initialized = True
         else:
-            preparing = (swarm.mission_type == 7) & (swarm.transport_phase == 0)
-            if np.any(preparing):
-                cargo_box.enabled = True
-                pickup = swarm.tasks[8]
-                cargo_box.position = Vec3(pickup[0], pickup[1], pickup[2])
-                cargo_box.color = rgb(255, 165, 30, 200)
-            else:
-                cargo_box.enabled = False
+            cargo_box.position = lerp(cargo_box.position, target_vec, 12 * time.dt)
+            
+        # Sink and fade out
+        cargo_box.scale_y = max(0.1, 40 * ratio)
+        cargo_box.y -= (40 - cargo_box.scale_y) / 2
+        
+        alpha_outer = int(180 * ratio)
+        alpha_core = int(220 * ratio)
+        alpha_rings = int(150 * ratio)
+        
+        cargo_box.color = rgb(30, 255, 120, alpha_outer)
+        cargo_core.color = rgb(100, 255, 180, alpha_core)
+        cargo_ring1.color = rgb(30, 255, 120, alpha_rings)
+        cargo_ring2.color = rgb(30, 255, 120, alpha_rings)
+        
+        cargo_box.rotation_y += 45 * time.dt
+        cargo_core.rotation_y -= 90 * time.dt
+        cargo_ring1.rotation_z += 60 * time.dt
+        cargo_ring2.rotation_x += 60 * time.dt
+    elif np.any(transporting):
+        cargo_box.enabled = True
+        dropoff_pad.enabled = True
+        dropoff = swarm.tasks[9]
+        dropoff_pad.position = Vec3(dropoff[0], dropoff[1] - 40, dropoff[2])
+        
+        cargo_box.scale_y = 40
+        c_pos = np.mean(swarm.positions[transporting], axis=0)
+        target_vec = Vec3(c_pos[0], c_pos[1], c_pos[2])
+        if not hasattr(cargo_box, 'initialized'):
+            cargo_box.position = target_vec
+            cargo_box.initialized = True
+        else:
+            cargo_box.position = lerp(cargo_box.position, target_vec, 12 * time.dt)
+            
+        cargo_box.color = rgb(255, 50, 50, 180)
+        cargo_core.color = rgb(255, 100, 100, 220)
+        cargo_ring1.color = rgb(255, 50, 50, 150)
+        cargo_ring2.color = rgb(255, 50, 50, 150)
+        
+        cargo_box.rotation_y += 45 * time.dt
+        cargo_core.rotation_y -= 90 * time.dt
+        cargo_ring1.rotation_z += 60 * time.dt
+        cargo_ring2.rotation_x += 60 * time.dt
+    elif np.any(preparing):
+        cargo_box.enabled = True
+        dropoff_pad.enabled = False
+        cargo_box.scale_y = 40
+        pickup = swarm.tasks[8]
+        cargo_box.position = Vec3(pickup[0], pickup[1], pickup[2])
+        cargo_box.initialized = True
+        
+        cargo_box.color = rgb(255, 165, 30, 180)
+        cargo_core.color = rgb(255, 200, 100, 220)
+        cargo_ring1.color = rgb(255, 165, 30, 150)
+        cargo_ring2.color = rgb(255, 165, 30, 150)
+        
+        cargo_box.rotation_y += 45 * time.dt
+        cargo_core.rotation_y -= 90 * time.dt
+        cargo_ring1.rotation_z += 60 * time.dt
+        cargo_ring2.rotation_x += 60 * time.dt
+    else:
+        cargo_box.enabled = False
+        dropoff_pad.enabled = False
 
     if _frame[0] % 6 == 0:
         if show_vectors and active_count > 0:
@@ -775,9 +969,7 @@ def update():
 
     if _frame[0] % 6 == 0:
         global log_timer
-        visited_count = np.count_nonzero(swarm.visited_grid)
-        cov_pct = (visited_count / (swarm.grid_res**3)) * 100
-        coverage_text.text = f'COVERAGE: {cov_pct:.1f}%'
+        cov_pct = swarm.coverage_pct
 
         if show_heatmap or show_vectors:
             new_mask = swarm.visited_grid & ~swarm.last_grid
@@ -791,8 +983,6 @@ def update():
                     if show_heatmap:
                         hmap_verts.append(Vec3(*pos))
                         hmap_colors.append(rgb(0, 210, 255, 40))
-                    if len(hmap_verts) % 10 == 0:
-                        DiscoveryPulse(Vec3(*pos))
 
                 if show_heatmap:
                     min_len = min(len(hmap_verts), len(hmap_colors))
@@ -817,9 +1007,8 @@ def update():
                 'Robustness': swarm.get_robustness_score(_t - app.start_time)
             })
 
-        if cov_pct > 99.5 and not mission_banner.enabled:
-            mission_banner.enabled = True
-            mission_banner.animate_color(rgb(20, 180, 255, 180), duration=2)
+        if cov_pct > 99.5 and not getattr(mission_banner, 'has_shown', False):
+            show_banner()
             if hasattr(swarm, 'recall_fleet'): swarm.recall_fleet()
             save_metrics_csv() 
 
@@ -827,6 +1016,7 @@ def update():
         centroid_marker.enabled = show_centroid
         centroid_marker.position = centroid
         centroid_marker.rotation_y += 45 * time.dt
+
         
         _gt = _t * 0.5
         gx = W/2 + math.sin(_gt) * W*0.3
@@ -837,9 +1027,9 @@ def update():
 
     if _frame[0] % 10 == 0:
         cov = swarm.coverage_pct
-        dead_n = int(np.sum(swarm.dead_mask))
+        dead_n = int(np.sum(swarm.dead_mask | swarm.failed_mask))
         fps_v  = int(round(1.0 / max(time.dt, 0.001)))
-        fault  = '[FAULT] ' if swarm.fault_injected else ''
+        fault  = '[FAULT] ' if np.any(swarm.failed_mask) else ''
         algo   = swarm.use_method.upper()
         cam_s  = 'CINEMATIC' if cinematic_mode else 'Free'
         trail_s = 'ON' if show_trails else 'OFF'
@@ -850,63 +1040,97 @@ def update():
         gpu_s = 'GPU' if GPU_AVAILABLE else 'CPU'
         threads_s = str(config.num_threads)
 
-        transport_active = int(np.sum((swarm.mission_type == 7) & ~swarm.dead_mask))
+        transport_active = int(np.sum((swarm.mission_type == 7) & ~swarm.dead_mask & ~swarm.failed_mask))
         info_text.text = (
-            'SWARM  COVERAGE  METRICS\n'
-            '------------------------\n'
-            f'Active : {fault}{active_count}/{swarm.num_boids}\n'
-            f'Dead   : {dead_n}\n'
-            f'Cover  : {cov:.1f}%\n'
-            f'Transport: {transport_active}/{config.transport_drone_count}\n'
-            f'Status : {wp_s}\n'
-            f'Algo   : {algo}\n'
-            f'Backend: {gpu_s} | {threads_s}T\n'
-            f'Sim TPS: {int(_physics_tps[0])}\n'
-            f'FPS    : {fps_v}\n'
-            f'Robustness: {swarm.get_robustness_score(_t - app.start_time):.2f}\n'
-            f'\n'
-            f'Controls: see panel for key bindings.'
+            f'<cyan>SWARM SYSTEM\n'
+            f'-------------------\n'
+            f'<gray>Active  : <white>{fault}{active_count}/{swarm.num_boids}\n'
+            f'<gray>Offline : <white>{dead_n}\n'
+            f'<gray>Tasking : <white>{transport_active}/{config.transport_drone_count}\n\n'
+            f'<cyan>PERFORMANCE\n'
+            f'-------------------\n'
+            f'<gray>Algo    : <white>{algo}\n'
+            f'<gray>Compute : <white>{gpu_s} | {threads_s}T\n\n'
+            f'<cyan>INTEGRITY\n'
+            f'-------------------\n'
+            f'<gray>Stability: <white>{swarm.get_robustness_score(_t - app.start_time):.2f}'
         )
 
-        if obs_mode:
-            mode_bar_bg.enabled = True
-            mov_tag = ' [MOVING]' if obs_moving_mode else ''
-            mode_bar.text = (f'[ OBS MODE{mov_tag} ]  Height:{int(obs_height[0])}'
-                             f'  |  M=Moving  ↑↓=Height  LClick=Place  RClick=Undo')
-        else:
+        if cinematic_mode:
+            ui_panel.enabled = False
+            ui_panel_bg.enabled = False
+            mission_hud_panel.enabled = show_mission_hud
+            mission_hud_border.enabled = show_mission_hud
+            info_text.enabled = False
+            controls_text.enabled = False
+            force_hud.enabled = False
             mode_bar_bg.enabled = False
-            mode_bar.text = ''
+            separation_slider.enabled = False
+            alignment_slider.enabled = False
+            cohesion_slider.enabled = False
+            waypoint_slider.enabled = False
+            separation_slider.text_entity.enabled = False
+            alignment_slider.text_entity.enabled = False
+            cohesion_slider.text_entity.enabled = False
+            waypoint_slider.text_entity.enabled = False
+            boundary_faces.enabled = True
+            boundary_faces.color = rgb(15, 28, 48, 40) # Very slight surface coloring in cinematic mode
+            sky_sphere.enabled = False
+            star_field.enabled = False
+            floor_plane.enabled = False
 
-        if show_benchmark:
+            # Cinematic HUD Update
+            cinematic_hud.enabled = True
+            cine_stats.text = (
+                f'<cyan>ACTIVE: <white>{active_count}    '
+                f'<cyan>OFFLINE: <white>{dead_n}    '
+                f'<cyan>FPS: <white>{fps_v}    '
+                f'<cyan>TPS: <white>{int(_physics_tps[0])}    '
+                f'<cyan>ALGO: <white>{algo}    '
+                f'<cyan>COVERAGE: <white>{cov:.1f}%'
+            )
+        else:
+            cinematic_hud.enabled = False
+            ui_panel.enabled = True
+            ui_panel_bg.enabled = True
+            mission_hud_panel.enabled = show_mission_hud
+            mission_hud_border.enabled = show_mission_hud
+            info_text.enabled = True
+            controls_text.enabled = True
+            force_hud.enabled = show_vectors
+            separation_slider.enabled = True
+            alignment_slider.enabled = True
+            cohesion_slider.enabled = True
+            waypoint_slider.enabled = True
+            separation_slider.text_entity.enabled = True
+            alignment_slider.text_entity.enabled = True
+            cohesion_slider.text_entity.enabled = True
+            waypoint_slider.text_entity.enabled = True
+            boundary_faces.enabled = True
+            boundary_faces.color = rgb(15, 28, 48, 160) # Restore normal mode opacity
+            sky_sphere.enabled = True
+            star_field.enabled = True
+            floor_plane.enabled = True
+            if obs_mode:
+                mode_bar_bg.enabled = True
+                mov_tag = ' [MOVING]' if obs_moving_mode else ''
+                mode_bar.text = (f'[ OBS MODE{mov_tag} ]  Height:{int(obs_height[0])}'
+                                 f'  |  M=Moving  ↑↓=Height  LClick=Place  RClick=Undo')
+            else:
+                mode_bar_bg.enabled = False
+                mode_bar.text = ''
+
+        if show_benchmark and not cinematic_mode:
+            bench_panel.enabled = True
             bench_text.text = (
                 f'FPS: {fps_v}  Sim TPS: {int(_physics_tps[0])}\n'
                 f'{swarm.metrics.get_hud_text()}'
             )
+        else:
+            bench_panel.enabled = False
 
     if held_keys['r']:
-        swarm.__init__(env)
-        waypoint_marker.enabled = False
-        swarm.env.target_waypoint = None
-        hmap_verts.clear(); hmap_colors.clear()
-        hmap_ent.model.vertices = []; hmap_ent.model.generate()
-        
-        metrics_log.clear()
-        log_timer = 0
-        mission_banner.enabled = False
-        mission_banner.color = rgb(20, 180, 255, 0)
-        
-        for i, e in enumerate(boid_entities):
-            e.color = rgb(0, 210, 255); e.y = 0; e.rotation_x = 0
-            e._prev_color_key = ''
-            trail_buffers[i].clear()
-            e.trail.model.vertices = []; e.trail.model.generate()
-        while user_added:
-            rec = user_added.pop()
-            destroy(rec['ent'])
-            if len(swarm.env.obstacles) > _initial_static_count:
-                swarm.env.obstacles.pop()
-            if static_obs_ents: static_obs_ents.pop()
-        user_moving_obs.clear()
+        perform_full_reset()
     
     render_profiler.end_frame()
     render_stats.record_render_frame(time.dt if hasattr(time, 'dt') else 0.016)
@@ -934,16 +1158,6 @@ def input(key):
     global show_benchmark
     global obs_ghost, obs_height, static_obs_ents, user_added, user_moving_obs, _initial_static_count
 
-    if key == '9':
-        config.transport_drone_count = min(swarm.num_boids, config.transport_drone_count + 5)
-        transport_count_label.text = str(config.transport_drone_count)
-        return
-        
-    if key == '8':
-        config.transport_drone_count = max(1, config.transport_drone_count - 5)
-        transport_count_label.text = str(config.transport_drone_count)
-        return
-
     if key in ('scroll up', 'scroll down'):
         try:
             y_rot = math.radians(editor_cam.rotation_y)
@@ -957,6 +1171,14 @@ def input(key):
             pass
         return
 
+    if key == '9':
+        config.transport_drone_count = min(swarm.num_boids, config.transport_drone_count + 5)
+        return
+        
+    if key == '8':
+        config.transport_drone_count = max(1, config.transport_drone_count - 5)
+        return
+
     if key == 'v':
         show_vectors = not show_vectors
         force_hud.enabled = show_vectors
@@ -968,7 +1190,9 @@ def input(key):
     if   key == '1': swarm.set_method('naive')
     elif key == '2': swarm.set_method('octree')
     elif key == 'g': show_centroid = not show_centroid
-    elif key == 'p': save_metrics_csv()
+    elif key == 'p': 
+        global show_mission_hud
+        show_mission_hud = not show_mission_hud
     elif key == 'l':
         show_neighbor_lines = not show_neighbor_lines
         nb_line_ent.enabled = show_neighbor_lines
@@ -997,6 +1221,15 @@ def input(key):
     if key == 'c':
         cinematic_mode = not cinematic_mode
         cinematic_mode_running[0] = cinematic_mode
+        if cinematic_mode:
+            _saved_cam_z[0] = camera.z
+            # Neutralize EditorCamera (update block handles the actual monkey-patch)
+        else:
+            # Restore EditorCamera if monkey-patched
+            if hasattr(editor_cam, '_orig_update'):
+                editor_cam.update = editor_cam._orig_update
+                editor_cam.input = editor_cam._orig_input
+            camera.z = _saved_cam_z[0]
     elif key == 'o':
         obs_mode = not obs_mode
         obs_ghost.enabled = False

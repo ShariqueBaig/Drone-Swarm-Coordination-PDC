@@ -17,19 +17,20 @@ height = 1000
 
 # ── Boid parameters ───────────────────────────────────────────────────────────
 num_boids         = 100
-max_speed         = 250
-max_force         = 5.0
+max_speed         = 400       # Increased for faster coverage
+max_force         = 8.0       # Increased for more responsive steering
 perception_radius = 50
-safety_distance   = 25
+safety_distance   = 35        # Increased to match higher speeds
 seed              = 42
 dt                = 0.02
 
 # ── Rule weights ──────────────────────────────────────────────────────────────
-separation_weight = 12.0      # Significantly increased for strong repulsion
+separation_weight = 15.0      # Increased for stronger repulsion and spreading
 alignment_weight  = 1.0
-cohesion_weight   = 0.6       # Decreased to allow drones to spread out
+cohesion_weight   = 0.3       # Significantly decreased to allow drones to spread out even more
 obstacle_weight   = 1.6       # reduced for tighter maneuverability
 boundary_weight   = 2.5       # increased to prevent wall clipping
+waypoint_weight   = 2.5       # Added missing waypoint weight parameter
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 BACKGROUND_COLOR = (30, 30, 30)
@@ -45,7 +46,7 @@ cell_size     = perception_radius
 log_frequency = 100
 
 # ── Milestone 2 ───────────────────────────────────────────────────────────────
-task_weight = 2.0
+task_weight = 4.5   # Increased for robust heatmap coverage steering
 formation_weight = 1.0
 communication_radius = 100
 task_radius = 20
