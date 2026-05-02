@@ -714,12 +714,14 @@ class SwarmManager3D:
         m7 = (mt_eff == 7) & has_task
         if np.any(m7):
             idx7 = alive[m7]
+            n_assigned = len(idx7)
             
             phase0_idx = idx7[self.transport_phase[idx7] == 0]
             if len(phase0_idx) > 0:
                 dists = np.linalg.norm(self.tasks[8] - self.positions[phase0_idx], axis=1)
-                if np.all(dists < 50.0) and len(idx7) == 4:
-                    self.transport_phase[phase0_idx] = 1
+                # Ensure all drones in this mission have arrived before lifting
+                if np.all(dists < 60.0):
+                    self.transport_phase[idx7] = 1
 
             phase1_idx = idx7[self.transport_phase[idx7] == 1]
             if len(phase1_idx) > 0:
@@ -748,20 +750,16 @@ class SwarmManager3D:
                 phase = self.transport_phase[i]
                 target_pos = self.tasks[8 if phase == 0 else 9]
                 
-                corner_offsets = np.array([
-                    [ 25, 25,  25],
-                    [-25, 25,  25],
-                    [ 25, 25, -25],
-                    [-25, 25, -25]
-                ])
-                offset = corner_offsets[i_idx % 4]
+                # Dynamic Formation Offsets (Circular)
+                radius = 35.0
+                angle = (2 * math.pi * i_idx) / n_assigned
+                offset = np.array([radius * math.cos(angle), 25, radius * math.sin(angle)])
                 
                 if phase == 0:
                     dist_to_obj = np.linalg.norm(target_pos - self.positions[i])
                     if dist_to_obj < 60.0:
                         diff = (target_pos + offset) - self.positions[i]
                         dist = np.linalg.norm(diff)
-                        # Increased arrival radius for high-speed stability
                         arrival_radius = 45.0
                         speed = config.max_speed * (dist / arrival_radius) if dist < arrival_radius else config.max_speed
                         desired = (diff / max(dist, 1e-9)) * speed
@@ -773,7 +771,7 @@ class SwarmManager3D:
                         diff = target_pos - self.positions[i]
                         ts[i] = self._steer_toward(diff[np.newaxis, :], self.velocities[i, np.newaxis])[0]
                 elif phase == 1:
-                    # Adaptive look-ahead: reduce distance as we approach dropoff to prevent overshoot
+                    # Adaptive look-ahead
                     look_ahead_dist = (config.max_speed * 0.8) * min(1.0, c_dist / 150.0)
                     if c_dist < 20.0: look_ahead_dist = 0.0
                     

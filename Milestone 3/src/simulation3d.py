@@ -363,6 +363,7 @@ def perform_full_reset():
         del cargo_box.initialized
 
     for i, e in enumerate(boid_entities):
+        e.enabled = True
         e.color = rgb(0, 210, 255); e.y = 0; e.rotation_x = 0
         e._prev_color_key = ''
         trail_buffers[i].clear()
@@ -393,7 +394,7 @@ def select_mission(m_id):
         
         if m_id == 7:
             alive_indices = np.where(alive)[0]
-            num_to_assign = min(4, len(alive_indices))
+            num_to_assign = min(config.transport_drone_count, len(alive_indices))
             
             if num_to_assign > 0:
                 pickup_point = swarm.tasks[8]
@@ -417,7 +418,7 @@ def select_mission(m_id):
                     swarm.mission_type[remaining] = 3
                     swarm.assigned_tasks[remaining] = -1
                 
-                print(f"[M3] Transport Mission: {num_to_assign} drones assigned")
+                print(f"[M3] Transport Mission: {num_to_assign} drones assigned (Target: {config.transport_drone_count})")
             else:
                 print("[M3] No drones available for transport")
         else:
@@ -590,13 +591,16 @@ def update():
         update._transport_last_press = 0
     
     now = time.time()
-    if held_keys['8'] and (now - update._transport_last_press) > 0.3:
-        config.transport_drone_count = max(1, config.transport_drone_count - 5)
-        update._transport_last_press = now
+    if (held_keys['8'] or held_keys['9']) and (now - update._transport_last_press) > 0.2:
+        if held_keys['8']:
+            config.transport_drone_count = max(1, config.transport_drone_count - 1)
+        else:
+            config.transport_drone_count = min(swarm.num_boids, config.transport_drone_count + 1)
         
-    if held_keys['9'] and (now - update._transport_last_press) > 0.3:
-        config.transport_drone_count = min(swarm.num_boids, config.transport_drone_count + 5)
         update._transport_last_press = now
+        # Auto-update mission if currently in transport mode
+        if highlighted_mission[0] == 7:
+            select_mission(7)
     
     if waypoint_marker.enabled:
         waypoint_marker.rotation_y += 70 * time.dt
@@ -670,8 +674,13 @@ def update():
             if e._prev_color_key != 'dead':
                 e.color = rgb(255, 30, 30)
                 e._prev_color_key = 'dead'
-            e.y = max(-15, e.y - 140*time.dt)
-            e.rotation_x += 75*time.dt
+            
+            # Fall and then disappear
+            e.y -= 140 * time.dt
+            if e.y < -15:
+                e.enabled = False
+            else:
+                e.rotation_x += 75 * time.dt
             continue
 
         active_count += 1
@@ -1041,6 +1050,11 @@ def update():
         threads_s = str(config.num_threads)
 
         transport_active = int(np.sum((swarm.mission_type == 7) & ~swarm.dead_mask & ~swarm.failed_mask))
+        
+        # Update mission button text to show assigned count
+        if len(mission_btns) > 1:
+            mission_btns[1].text = f'Object Transport ({transport_active})'
+            
         info_text.text = (
             f'<cyan>SWARM SYSTEM\n'
             f'-------------------\n'
@@ -1172,11 +1186,13 @@ def input(key):
         return
 
     if key == '9':
-        config.transport_drone_count = min(swarm.num_boids, config.transport_drone_count + 5)
+        config.transport_drone_count = min(swarm.num_boids, config.transport_drone_count + 1)
+        if highlighted_mission[0] == 7: select_mission(7)
         return
         
     if key == '8':
-        config.transport_drone_count = max(1, config.transport_drone_count - 5)
+        config.transport_drone_count = max(1, config.transport_drone_count - 1)
+        if highlighted_mission[0] == 7: select_mission(7)
         return
 
     if key == 'v':
