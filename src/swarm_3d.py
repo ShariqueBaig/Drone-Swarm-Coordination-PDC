@@ -127,6 +127,7 @@ class SwarmManager3D:
         self.mission_type = np.full(self.num_boids, 3, dtype=int) # Default to Idle (3)
         self.mission_timer = np.random.rand(self.num_boids) * 30.0
         self.transport_phase = np.zeros(self.num_boids, dtype=int) # 0: Pickup, 1: Dropoff
+        self.delivered_mask = np.zeros(self.num_boids, dtype=bool)
         
         self.failed_mask = np.zeros(self.num_boids, dtype=bool)
         self.fault_injected = False
@@ -134,7 +135,7 @@ class SwarmManager3D:
         
         # ═══ PER-DRONE TARGETS (M3 Optimization) ═══
         # Prevents multiple drones from fighting over the same task index
-        self.drone_targets = self.positions.copy()
+        self.drone_targets = np.zeros((self.num_boids, 3))
         self.patrol_phase = np.zeros(self.num_boids, dtype=int)
 
         self.use_method = "numba_jit"
@@ -143,11 +144,36 @@ class SwarmManager3D:
 
         self.grid_res = 30
         # ═══ PDC TECHNIQUE: Spatial Grid for Coverage Tracking ═══
-        # Standard numpy grid for efficient visited cell tracking
-        # Note: PaddedGrid disabled due to memory overhead (6.87GB for padding)
-        # Instead using regular numpy array + thread-safe access via lock
         self.visited_grid = np.zeros((self.grid_res, self.grid_res, self.grid_res), dtype=bool)
-        self.last_grid = np.zeros((self.grid_res, self.grid_res, self.grid_res), dtype=bool)
+        
+        # ═══ Pre-mark Boundaries & Obstacles ═══
+        v_res = np.array([env.width / self.grid_res, env.height / self.grid_res, env.depth / self.grid_res])
+        margin = config.boundary_margin
+        
+        x_idx, y_idx, z_idx = np.indices((self.grid_res, self.grid_res, self.grid_res))
+        cx = x_idx * v_res[0] + v_res[0]/2
+        cy = y_idx * v_res[1] + v_res[1]/2
+        cz = z_idx * v_res[2] + v_res[2]/2
+        
+        bound_mask = (cx < margin) | (cx > env.width - margin) | \
+                     (cy < margin) | (cy > env.height - margin) | \
+                     (cz < margin) | (cz > env.depth - margin)
+        self.visited_grid[bound_mask] = True
+        
+        for ob in env.obstacles:
+            dist_sq = (cx - ob[0])**2 + (cy - ob[1])**2 + (cz - ob[2])**2
+            self.visited_grid[dist_sq < (ob[3] + 30)**2] = True
+            
+        for ob in env.dynamic_obstacles:
+            dist_sq = (cx - ob.x)**2 + (cy - ob.y)**2 + (cz - ob.z)**2
+            self.visited_grid[dist_sq < (ob.radius + 30)**2] = True
+            
+        self.last_grid = self.visited_grid.copy()
+        
+        # ═══ PDC TECHNIQUE: Filtered Coverage Analytics ═══
+        self.pre_marked_mask = self.visited_grid.copy()
+        self.pre_marked_count = np.count_nonzero(self.pre_marked_mask)
+        self.searchable_total = self.grid_res**3 - self.pre_marked_count
 
         self._pool = ThreadPoolExecutor(max_workers=config.num_threads)
         self._collision_lock = threading.Lock()
@@ -170,10 +196,21 @@ class SwarmManager3D:
         self.state_lock = threading.Lock()
 
     def _repopulate_work_queue(self):
-        # Collect unvisited cells using numpy
+        # COLLECT unvisited cells using numpy
+        # ═══ PDC TECHNIQUE: Batch Filtering ═══
+        # Avoid calling this repeatedly in a tight loop.
+        if hasattr(self, '_last_repop_frame') and self._last_repop_frame == self.frame_count:
+            return
+        self._last_repop_frame = self.frame_count
+
         unvisited = np.argwhere(~self.visited_grid)
         
         if len(unvisited) > 0:
+            # For performance, only take a subset if there are many unvisited cells
+            if len(unvisited) > 5000:
+                indices = np.random.choice(len(unvisited), 5000, replace=False)
+                unvisited = unvisited[indices]
+            
             np.random.shuffle(unvisited)
             with self._work_queue_lock:
                 self._work_queue.clear()
@@ -187,9 +224,13 @@ class SwarmManager3D:
 
     @property
     def coverage_pct(self):
-        # Count visited cells efficiently using numpy
-        visited_count = np.count_nonzero(self.visited_grid)
-        return (visited_count / (self.grid_res ** 3)) * 100
+        # ═══ PDC TECHNIQUE: Dynamic Analytics ═══
+        # Returns coverage of the 'searchable' area only (excludes walls/obstacles)
+        if self.searchable_total <= 0: return 100.0
+        
+        visited_total = np.count_nonzero(self.visited_grid)
+        covered_searchable = visited_total - self.pre_marked_count
+        return (max(0, covered_searchable) / self.searchable_total) * 100
 
     def find_neighbors_numba(self):
         """
@@ -412,11 +453,18 @@ class SwarmManager3D:
         np.add.at(nc, jj, coh_weight_ii)
 
         nc_s = np.maximum(nc[:, np.newaxis], 1)
-        return (
-            self.steer(sep_f),
-            self.steer(aln_f / nc_s, subtract_vels=True),
-            self.steer(coh_f / nc_s - self.positions, subtract_vels=True),
-        )
+        sep_steer = self.steer(sep_f)
+        aln_steer = self.steer(aln_f / nc_s, subtract_vels=True)
+        coh_steer = self.steer(coh_f / nc_s - self.positions, subtract_vels=True)
+        
+        # Disable flocking forces for transporting drones to ensure rigid, jitter-free formations
+        transport_mask = self.mission_type == 7
+        if np.any(transport_mask):
+            sep_steer[transport_mask] = 0.0
+            aln_steer[transport_mask] = 0.0
+            coh_steer[transport_mask] = 0.0
+
+        return sep_steer, aln_steer, coh_steer
 
     def obstacle_avoidance(self):
         obs_force = np.zeros((self.num_boids, 3))
@@ -532,8 +580,8 @@ class SwarmManager3D:
 
         self.mission_timer[alive] -= config.dt
         
-        # Only timeout for exploration/seeking missions. Idle (3), Transport (7), Recall (5) should NOT timeout.
-        can_timeout = (self.mission_type == 0) | (self.mission_type == 2) | (self.mission_type == 6)
+        # Only timeout for exploration/seeking missions. Coverage (6), Idle (3), Transport (7), Recall (5) should NOT timeout.
+        can_timeout = (self.mission_type == 0) | (self.mission_type == 2)
         done = (self.mission_timer <= 0) & can_timeout & (~self.dead_mask)
         
         if np.any(done):
@@ -577,44 +625,75 @@ class SwarmManager3D:
                 ts[s_idx] = self._steer_toward(diff0[seeking], self.velocities[s_idx])
 
 
-        # M2
-        m2 = (mt_eff == 2) & has_task
+        # M2 (Heatmap Coverage) — High-Momentum Exploration
+        # ═══ PDC TECHNIQUE: Global Frontier Seeking + Momentum Injection ═══
+        # To avoid 'suppressed motion', we give coverage drones high momentum and 
+        # ignore local flocking forces. They behave like 'scouts' that bee-line to targets.
+        m2_mask = (mt_eff == 2)
+        if np.any(m2_mask):
+            coverage_indices = alive[m2_mask]
+            self.assigned_tasks[coverage_indices[self.assigned_tasks[coverage_indices] == -1]] = 6
+        m2 = m2_mask
         if np.any(m2):
             idx2 = alive[m2]
             pos2 = self.positions[idx2]
-            v_res = np.array([self.env.width / self.grid_res, self.env.height / self.grid_res, self.env.depth / self.grid_res])
+            vel2 = self.velocities[idx2]
+            v_res = np.array([self.env.width / self.grid_res, 
+                              self.env.height / self.grid_res, 
+                              self.env.depth / self.grid_res])
 
-            gxyz = np.clip((pos2 / v_res).astype(int), 0, self.grid_res - 1)
-            visited = self.visited_grid[gxyz[:, 0], gxyz[:, 1], gxyz[:, 2]]
-            timer_low = self.mission_timer[idx2] < 0.8
-            needs_new = visited | timer_low
-
-            if np.any(needs_new):
-                for k in np.where(needs_new)[0]:
-                    i = idx2[k]
-                    gx, gy, gz = int(gxyz[k, 0]), int(gxyz[k, 1]), int(gxyz[k, 2])
-
-                    stolen = self._steal_work()
-                    if stolen is not None:
-                        tv = np.array(stolen)
+            # ── Phase 1: Aggressive Target Assignment ──
+            needs_repop = False
+            for k, i in enumerate(idx2):
+                dist_to_target = np.linalg.norm(self.drone_targets[i] - pos2[k])
+                # ═══ PDC BUGFIX: Coverage Precision ═══
+                # Tightened distance check from 80.0 to 25.0 to ensure cell entry.
+                # Added check to ensure drone is actually in the target cell's neighborhood.
+                gx, gy, gz = np.clip((self.drone_targets[i] / v_res).astype(int), 0, self.grid_res-1)
+                target_already_visited = self.visited_grid[gx, gy, gz]
+                
+                if dist_to_target < 25.0 or target_already_visited or self.mission_timer[i] < 0:
+                    stolen_cell = self._steal_work()
+                    if stolen_cell is not None:
+                        cell = np.array(stolen_cell, dtype=float)
+                        self.drone_targets[i] = cell * v_res + (v_res / 2)
+                        # Give time to reach the target
+                        self.mission_timer[i] = np.random.uniform(15, 35)
                     else:
-                        sr = 8 if self.mission_type[i] == 6 else 4
-                        rx = slice(max(0, gx - sr), min(self.grid_res, gx + sr))
-                        ry = slice(max(0, gy - sr), min(self.grid_res, gy + sr))
-                        rz = slice(max(0, gz - sr), min(self.grid_res, gz + sr))
+                        needs_repop = True
+                        # If queue empty, try to find closest unvisited cell (limited search)
+                        # But don't do it for ALL drones every frame. 
+                        # Use a small subset of argwhere for high-speed fallback.
+                        if self.frame_count % 5 == 0:
+                            unv = np.argwhere(~self.visited_grid)
+                            if len(unv) > 0:
+                                # Distance to a few random unvisited cells
+                                sub_idx = np.random.choice(len(unv), min(len(unv), 100))
+                                sub_unv = unv[sub_idx].astype(float) * v_res + (v_res/2)
+                                dists = np.linalg.norm(sub_unv - pos2[k], axis=1)
+                                best_near = np.argmin(dists)
+                                self.drone_targets[i] = sub_unv[best_near]
+                                self.mission_timer[i] = np.random.uniform(15, 25)
 
-                        lu = np.argwhere(~self.visited_grid[rx, ry, rz])
-                        if len(lu) > 0:
-                            c = lu[np.random.randint(len(lu))]
-                            tv = np.array([c[0] + rx.start, c[1] + ry.start, c[2] + rz.start])
-                        else:
-                            tv = np.array([gx, gy, gz])
+            if needs_repop:
+                self._repopulate_work_queue()
 
-                    self.drone_targets[i] = tv * v_res + (v_res / 2)
-                    self.mission_timer[i] = np.random.uniform(5, 10)
-
-            diff2 = self.drone_targets[idx2] - pos2
-            ts[idx2] = self._steer_toward(diff2, self.velocities[idx2])
+            # ── Phase 2: High-Velocity Steering ──
+            # Target force
+            target_diff = self.drone_targets[idx2] - pos2
+            # Add a 'momentum' term: keep moving in the current direction but steer toward target
+            # This prevents the 'suppressed motion' caused by rapid turns
+            target_steer = self._steer_toward(target_diff, vel2)
+            
+            # Momentum injection: project current velocity to maintain speed
+            current_spd = np.linalg.norm(vel2, axis=1, keepdims=True)
+            current_spd = np.maximum(current_spd, 1.0)
+            momentum_force = (vel2 / current_spd) * config.max_force * 0.5
+            
+            ts[idx2] = target_steer + momentum_force
+            
+            # Scale up force for coverage to ensure it dominates
+            ts[idx2] *= 2.0 
 
 
         m5 = (mt_eff == 5) & has_task
@@ -635,28 +714,99 @@ class SwarmManager3D:
         m7 = (mt_eff == 7) & has_task
         if np.any(m7):
             idx7 = alive[m7]
+            n_assigned = len(idx7)
+            
+            phase0_idx = idx7[self.transport_phase[idx7] == 0]
+            if len(phase0_idx) > 0:
+                dists = np.linalg.norm(self.tasks[8] - self.positions[phase0_idx], axis=1)
+                # Ensure all drones in this mission have arrived before lifting
+                if np.all(dists < 60.0):
+                    self.transport_phase[idx7] = 1
+
+            phase1_idx = idx7[self.transport_phase[idx7] == 1]
+            if len(phase1_idx) > 0:
+                dists = np.linalg.norm(self.tasks[9] - self.positions[phase1_idx], axis=1)
+                if np.all(dists < 50.0):
+                    self.transport_phase[phase1_idx] = 2
+                    self.mission_timer[phase1_idx] = 5.0
+                    
+            phase2_idx = idx7[self.transport_phase[idx7] == 2]
+            if len(phase2_idx) > 0:
+                if np.all(self.mission_timer[phase2_idx] <= 0):
+                    self.delivered_mask[phase2_idx] = True
+                    self.mission_type[phase2_idx] = 3
+                    self.assigned_tasks[phase2_idx] = -1
+
+            # Pre-calculate group centroid for phase 1
+            c_pos = np.zeros(3)
+            c_dir = np.zeros(3)
+            if len(phase1_idx) > 0:
+                c_pos = np.mean(self.positions[phase1_idx], axis=0)
+                c_diff = self.tasks[9] - c_pos
+                c_dist = np.linalg.norm(c_diff)
+                c_dir = c_diff / max(c_dist, 1e-9)
+
             for i_idx, i in enumerate(idx7):
                 phase = self.transport_phase[i]
                 target_pos = self.tasks[8 if phase == 0 else 9]
-                diff = target_pos - self.positions[i]
-                dist = np.linalg.norm(diff)
                 
-                if dist < 40.0:
-                    if phase == 0:
-                        self.transport_phase[i] = 1 # Picked up!
+                # Dynamic Formation Offsets (Circular)
+                radius = 35.0
+                angle = (2 * math.pi * i_idx) / n_assigned
+                offset = np.array([radius * math.cos(angle), 25, radius * math.sin(angle)])
+                
+                if phase == 0:
+                    dist_to_obj = np.linalg.norm(target_pos - self.positions[i])
+                    if dist_to_obj < 60.0:
+                        diff = (target_pos + offset) - self.positions[i]
+                        dist = np.linalg.norm(diff)
+                        arrival_radius = 45.0
+                        speed = config.max_speed * (dist / arrival_radius) if dist < arrival_radius else config.max_speed
+                        desired = (diff / max(dist, 1e-9)) * speed
+                        ts[i] = desired - self.velocities[i]
+                        mag = np.linalg.norm(ts[i])
+                        if mag > config.max_force:
+                            ts[i] = (ts[i] / mag) * config.max_force * 2.5
                     else:
-                        self.mission_type[i] = 3 # Mission Complete -> Idle
-                        self.assigned_tasks[i] = -1
-                        self.transport_phase[i] = 0
-                
-                ts[i] = self._steer_toward(diff[np.newaxis, :], self.velocities[i, np.newaxis])[0]
+                        diff = target_pos - self.positions[i]
+                        ts[i] = self._steer_toward(diff[np.newaxis, :], self.velocities[i, np.newaxis])[0]
+                elif phase == 1:
+                    # Adaptive look-ahead
+                    look_ahead_dist = (config.max_speed * 0.8) * min(1.0, c_dist / 150.0)
+                    if c_dist < 20.0: look_ahead_dist = 0.0
+                    
+                    virtual_obj_pos = c_pos + c_dir * look_ahead_dist
+                    diff = (virtual_obj_pos + offset) - self.positions[i]
+                    dist = np.linalg.norm(diff)
+                    arrival_radius = 45.0
+                    speed = config.max_speed * (dist / arrival_radius) if dist < arrival_radius else config.max_speed
+                    desired = (diff / max(dist, 1e-9)) * speed
+                    ts[i] = desired - self.velocities[i]
+                    mag = np.linalg.norm(ts[i])
+                    if mag > config.max_force:
+                        ts[i] = (ts[i] / mag) * config.max_force * 2.5
+                elif phase == 2:
+                    timer_ratio = max(0, self.mission_timer[i] / 5.0)
+                    lowered_target = target_pos - np.array([0, 30.0 * (1.0 - timer_ratio), 0])
+                    diff = (lowered_target + offset) - self.positions[i]
+                    dist = np.linalg.norm(diff)
+                    arrival_radius = 45.0
+                    speed = config.max_speed * (dist / arrival_radius) if dist < arrival_radius else config.max_speed
+                    desired = (diff / max(dist, 1e-9)) * speed
+                    ts[i] = desired - self.velocities[i]
+                    mag = np.linalg.norm(ts[i])
+                    if mag > config.max_force:
+                        ts[i] = (ts[i] / mag) * config.max_force * 2.5
+                else:
+                    diff = target_pos - self.positions[i]
+                    ts[i] = self._steer_toward(diff[np.newaxis, :], self.velocities[i, np.newaxis])[0]
 
         return ts
 
     def calculate_formation_steer(self):
         fs = np.zeros_like(self.positions)
-        # Only apply rigid formation to drones doing Coverage (6)
-        doing_formation = (~self.dead_mask) & (self.mission_type == 6)
+        # Formation steering disabled for heatmap coverage to allow spreading out
+        doing_formation = (~self.dead_mask) & (self.mission_type == -1)
         if not np.any(doing_formation): return fs
 
         center = np.mean(self.positions[doing_formation], axis=0)
@@ -692,6 +842,7 @@ class SwarmManager3D:
         return f_obs
 
     def inject_faults(self, percentage=0.15):
+        self.fault_injected = True
         num_fail = int(self.num_boids * percentage)
         potential = np.where(~self.dead_mask & ~self.failed_mask)[0]
         if len(potential) == 0: return
@@ -702,6 +853,7 @@ class SwarmManager3D:
 
     def reset_faults(self):
         self.failed_mask[:] = False
+        self.fault_injected = False
 
     def recall_fleet(self, target=None):
         alive = np.where(~self.dead_mask & ~self.failed_mask)[0]
@@ -800,14 +952,32 @@ class SwarmManager3D:
         # Lock acquired ONLY during integration write so visualizer doesn't read torn state
         with self.state_lock:
             acc = self.accelerations
-            acc[active_idx] += sep_s[active_idx] * config.separation_weight
-            acc[active_idx] += aln_s[active_idx] * config.alignment_weight
-            acc[active_idx] += coh_s[active_idx] * config.cohesion_weight
-            acc[active_idx] += obs_s[active_idx] * config.obstacle_weight
-            acc[active_idx] += f_fail[active_idx] * 2.0
-            acc[active_idx] += wall_s[active_idx] * config.boundary_weight
-            acc[active_idx] += task_s[active_idx] * config.task_weight
-            acc[active_idx] += form_s[active_idx] * config.formation_weight
+            # ── PDC TECHNIQUE: Adaptive Task Weighting ──
+            # Suppress flocking forces for coverage drones to prevent "opposing intent"
+            is_coverage = (self.mission_type == 6)
+            coverage_idx = np.where(alive & is_coverage)[0]
+            
+            # Apply normal weights to non-coverage drones
+            other_idx = np.where(alive & ~is_coverage)[0]
+            
+            if len(other_idx) > 0:
+                acc[other_idx] += sep_s[other_idx] * config.separation_weight
+                acc[other_idx] += aln_s[other_idx] * config.alignment_weight
+                acc[other_idx] += coh_s[other_idx] * config.cohesion_weight
+                acc[other_idx] += obs_s[other_idx] * config.obstacle_weight
+                acc[other_idx] += f_fail[other_idx] * 2.0
+                acc[other_idx] += wall_s[other_idx] * config.boundary_weight
+                acc[other_idx] += task_s[other_idx] * config.task_weight
+                acc[other_idx] += form_s[other_idx] * config.formation_weight
+
+            if len(coverage_idx) > 0:
+                # Coverage drones prioritize the task and ignore flocking
+                # This eliminates the "suppressed motion" issue and provides aggressive acceleration
+                acc[coverage_idx] += sep_s[coverage_idx] * (config.separation_weight * 0.1)
+                acc[coverage_idx] += obs_s[coverage_idx] * config.obstacle_weight
+                acc[coverage_idx] += wall_s[coverage_idx] * config.boundary_weight
+                # Boosted task weight for fast acceleration (snappy response)
+                acc[coverage_idx] += task_s[coverage_idx] * (config.task_weight * 8.0)
 
             failed_idx = np.where(alive & self.failed_mask)[0]
             if len(failed_idx) > 0:

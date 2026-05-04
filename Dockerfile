@@ -59,4 +59,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python3 -c "import sys; sys.exit(0)" || exit 1
 
 # Default command runs the simulation
-CMD ["python3", "Milestone 2/src/main.py"]
+CMD ["python3", "src/simulation3d.py"]

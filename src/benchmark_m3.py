@@ -2,12 +2,12 @@
 import time
 import numpy as np
 import config
-from environment import Environment
-from swarm import SwarmManager
+from environment3d import Environment3D
+from swarm_3d import SwarmManager3D
 
 def run_benchmark(num_frames=100, method="naive"):
-    env = Environment()
-    swarm = SwarmManager(env)
+    env = Environment3D()
+    swarm = SwarmManager3D(env)
     swarm.set_method(method)
     
     print(f"--- Benchmarking M3 | Method: {method.upper()} | Drones: {config.num_boids} ---")
