@@ -93,6 +93,10 @@ class SwarmManager:
         self._last_pairs_j = np.array([], dtype=int)
         self.transport_team_size = int(getattr(config, "transport_team_size", 1))
 
+        # Stable per-drone order for mission-8 formation slot assignment.
+        self._formation_order = np.arange(self.num_boids, dtype=int)
+        self._m8_forming = False
+
         self.grid_res = 30
         # 2D coverage grid: (30, 30)
         self.visited_grid = np.zeros((self.grid_res, self.grid_res), dtype=bool)
@@ -525,6 +529,14 @@ class SwarmManager:
         self.mission_type[alive] = mission_id
         self.assigned_tasks[alive] = -1
 
+        # Freeze a stable left-to-right ordering at mission start so M8 slots do not jitter.
+        if mission_id == 8:
+            alive_idx = np.where(alive & ~self.failed_mask)[0]
+            if len(alive_idx) > 0:
+                sort_local = np.argsort(self.positions[alive_idx, 0])
+                self._formation_order = alive_idx[sort_local]
+            self._m8_forming = True
+
         if mission_id in self.mission_pending:
             self.mission_started_at[mission_id] = time.time()
             self.mission_pending[mission_id] = True
@@ -737,11 +749,9 @@ class SwarmManager:
         m8 = (mt_eff == 8)
         if np.any(m8):
             idx8 = alive[m8]
-            target = self.tasks[9]
-            if getattr(self.env, "target_waypoint", None) is not None:
-                target = np.array(self.env.target_waypoint)
-            diff8 = target - self.positions[idx8]
-            ts[idx8] = self._steer_toward(diff8, self.velocities[idx8]) * 0.5
+            # Formation traversal movement is handled by calculate_formation_steer.
+            # Keep task force neutral here to avoid collapsing the formation.
+            ts[idx8] = 0.0
 
         # ── M7: Object Transport ──────────────────────────────────────────────
         m7 = (mt_eff == 7) & has_task
@@ -804,28 +814,114 @@ class SwarmManager:
             side_vec = np.array([0.0, 1.0])
         side_vec = side_vec / np.linalg.norm(side_vec)
 
-        # Dynamic grid size
-        grid_cols = int(np.ceil(np.sqrt(n_active)))
-        spacing = 40.0  # Slightly larger than safety_distance (25) to prevent separation fighting
+        # Build per-mission targets:
+        # - M8 uses a distinct wedge/V formation that traverses to waypoint/target.
+        # - M6 keeps a compact grid for area-coverage structure.
+        mt_active = self.mission_type[active_idx]
 
-        # Array of indices for active drones
-        indices = np.arange(n_active)
-        r = indices // grid_cols
-        c = indices % grid_cols
+        # Coverage grid (M6) subset.
+        idx6 = active_idx[mt_active == 6]
+        if len(idx6) > 0:
+            n6 = len(idx6)
+            grid_cols = int(np.ceil(np.sqrt(n6)))
+            spacing6 = 36.0
 
-        # Center the grid perfectly around the center of mass
-        row_offset = (r - (grid_cols - 1) / 2.0) * spacing
-        col_offset = (c - (grid_cols - 1) / 2.0) * spacing
+            indices6 = np.arange(n6)
+            r6 = indices6 // grid_cols
+            c6 = indices6 % grid_cols
 
-        # Compute targets for active drones
-        targets = (
-            center[np.newaxis, :]
-            - dir_vec[np.newaxis, :] * row_offset[:, np.newaxis]
-            + side_vec[np.newaxis, :] * col_offset[:, np.newaxis]
-        )
+            row_offset6 = (r6 - (grid_cols - 1) / 2.0) * spacing6
+            col_offset6 = (c6 - (grid_cols - 1) / 2.0) * spacing6
 
-        full_steer = self.steer(targets - self.positions[active_idx], subtract_vels=self.velocities[active_idx])
-        fs[active_idx] = full_steer
+            targets6 = (
+                center[np.newaxis, :]
+                - dir_vec[np.newaxis, :] * row_offset6[:, np.newaxis]
+                + side_vec[np.newaxis, :] * col_offset6[:, np.newaxis]
+            )
+            fs[idx6] = self.steer(targets6 - self.positions[idx6], subtract_vels=self.velocities[idx6])
+
+        # Formation traversal compact block (M8) subset.
+        idx8 = active_idx[mt_active == 8]
+        if len(idx8) > 0:
+            center8 = np.mean(self.positions[idx8], axis=0)
+            # Move formation center toward selected waypoint (or fallback task).
+            lead_target = self.tasks[9]
+            if getattr(self.env, "target_waypoint", None) is not None:
+                lead_target = np.array(self.env.target_waypoint)
+
+            # Use waypoint direction for a stable, visually coherent traversal heading.
+            to_goal = lead_target - center8
+            goal_dist = np.linalg.norm(to_goal)
+            if goal_dist > 1e-6:
+                dir_vec8 = to_goal / goal_dist
+            else:
+                dir_vec8 = dir_vec
+            side_vec8 = np.array([-dir_vec8[1], dir_vec8[0]])
+            side_norm = np.linalg.norm(side_vec8)
+            if side_norm < 1e-6:
+                side_vec8 = np.array([0.0, 1.0])
+            else:
+                side_vec8 = side_vec8 / side_norm
+
+            # Stable ordering avoids slot re-shuffling/jitter every frame.
+            in_order = self._formation_order[np.isin(self._formation_order, idx8)]
+            if len(in_order) != len(idx8):
+                fallback = np.setdiff1d(idx8, in_order, assume_unique=False)
+                in_order = np.concatenate([in_order, fallback])
+
+            n8 = len(in_order)
+            cols = int(np.ceil(np.sqrt(n8)))
+            rows = int(np.ceil(n8 / cols))
+            slots = np.arange(n8)
+            r = slots // cols
+            c = slots % cols
+
+            spacing_long = 28.0
+            spacing_lat = 28.0
+            row_offset = (r - (rows - 1) / 2.0) * spacing_long
+            col_offset = (c - (cols - 1) / 2.0) * spacing_lat
+
+            # Two-phase control: form up first, then traverse.
+            # Hysteresis prevents mode flicker when near threshold.
+            if not hasattr(self, "_m8_forming"):
+                self._m8_forming = True
+
+            advance = 0.0 if self._m8_forming else min(70.0, goal_dist)
+            formation_center = center8 + dir_vec8 * advance
+            margin = 110.0
+            formation_center[0] = np.clip(formation_center[0], margin, self.env.width - margin)
+            formation_center[1] = np.clip(formation_center[1], margin, self.env.height - margin)
+
+            targets8 = (
+                formation_center[np.newaxis, :]
+                - dir_vec8[np.newaxis, :] * row_offset[:, np.newaxis]
+                + side_vec8[np.newaxis, :] * col_offset[:, np.newaxis]
+            )
+            targets8[:, 0] = np.clip(targets8[:, 0], margin, self.env.width - margin)
+            targets8[:, 1] = np.clip(targets8[:, 1], margin, self.env.height - margin)
+
+            # Strong slot-hold controller: desired velocity = cruise + position correction.
+            slot_error = targets8 - self.positions[in_order]
+            slot_err_mag = np.linalg.norm(slot_error, axis=1)
+            mean_err = float(np.mean(slot_err_mag)) if len(slot_err_mag) > 0 else 0.0
+            if self._m8_forming and mean_err < 26.0:
+                self._m8_forming = False
+            elif (not self._m8_forming) and mean_err > 42.0:
+                self._m8_forming = True
+
+            kp = 1.8
+            cruise_speed = 0.0 if self._m8_forming else 60.0
+            cruise = dir_vec8[np.newaxis, :] * cruise_speed
+            desired_vel = cruise + kp * slot_error
+            steer_raw = desired_vel - self.velocities[in_order]
+            mag = np.linalg.norm(steer_raw, axis=1, keepdims=True)
+            max_form_force = config.max_force * 2.5
+            over = (mag[:, 0] > max_form_force)
+            if np.any(over):
+                steer_raw[over] = steer_raw[over] / np.maximum(mag[over], 1e-9) * max_form_force
+            fs8 = steer_raw
+            fs[in_order] = fs8
+
         return fs
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -988,6 +1084,21 @@ class SwarmManager:
             acc[active_idx] += task_s[active_idx] * config.task_weight
             acc[active_idx] += form_s[active_idx] * config.formation_weight
 
+            # Mission-8: temporarily favor formation lock over flocking.
+            m8_active = active_idx[self.mission_type[active_idx] == 8]
+            if len(m8_active) > 0:
+                # Rebuild acceleration for M8 only with mission-specific gains.
+                # Lower repulsion and flocking; keep obstacle/wall safety; strongly enforce slots.
+                acc[m8_active] = 0.0
+                acc[m8_active] += sep_s[m8_active]  * (config.separation_weight * 0.85)
+                acc[m8_active] += aln_s[m8_active]  * (config.alignment_weight * 0.08)
+                acc[m8_active] += coh_s[m8_active]  * (config.cohesion_weight * 0.10)
+                acc[m8_active] += obs_s[m8_active]  * config.obstacle_weight
+                acc[m8_active] += wall_s[m8_active] * config.boundary_weight
+                acc[m8_active] += f_fail[m8_active] * 2.0
+                acc[m8_active] += task_s[m8_active] * 0.0
+                acc[m8_active] += form_s[m8_active] * (config.formation_weight * 3.8)
+
             # Failed drones: zero acceleration (no gravity in 2D)
             failed_idx = np.where(alive & self.failed_mask)[0]
             if len(failed_idx) > 0:
@@ -1001,7 +1112,9 @@ class SwarmManager:
                     np.array(self.env.target_waypoint) - self.positions,
                     subtract_vels=True,
                 )
-                acc[active_idx] += waypoint_s[active_idx] * getattr(config, "waypoint_weight", 2.5)
+                waypoint_idx = active_idx[self.mission_type[active_idx] != 8]
+                if len(waypoint_idx) > 0:
+                    acc[waypoint_idx] += waypoint_s[waypoint_idx] * getattr(config, "waypoint_weight", 2.5)
 
             self.last_sep      = sep_s  * config.separation_weight
             self.last_aln      = aln_s  * config.alignment_weight
@@ -1009,6 +1122,20 @@ class SwarmManager:
             self.last_waypoint = waypoint_s * getattr(config, "waypoint_weight", 2.5)
 
             self.velocities[alive] += acc[alive]
+
+            # Mission-8: temporary damping and lower speed cap to keep a rigid-looking formation.
+            m8_all = alive & (self.mission_type == 8)
+            if np.any(m8_all):
+                self.velocities[m8_all] *= 0.90
+                m8_speed = np.linalg.norm(self.velocities[m8_all], axis=1)
+                m8_cap = 95.0 if self._m8_forming else 120.0
+                m8_over = m8_speed > m8_cap
+                if np.any(m8_over):
+                    idx_m8 = np.where(m8_all)[0][m8_over]
+                    self.velocities[idx_m8] = (
+                        self.velocities[idx_m8] / np.maximum(m8_speed[m8_over, np.newaxis], 1e-9)
+                    ) * m8_cap
+
             speeds = np.linalg.norm(self.velocities[alive], axis=1)
             over = speeds > config.max_speed
             if np.any(over):
